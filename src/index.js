@@ -15,15 +15,26 @@ app.use(express.json());
 const PORT = process.env.PORT || 8787;
 
 app.post("/check", async (req, res) => {
-  const { docId, moaType, accessToken } = req.body;
+  const { docId, moaType, accessToken, codedSelection } = req.body;
 
   if (!docId || !moaType || !accessToken) {
     return res.status(400).json({ error: "docId, moaType, and accessToken are required." });
   }
 
+  // codedSelection ("coded" | "non_coded") is only meaningful for
+  // Sponsorship — the popup's precautionary pre-check toggle described in
+  // moa.md. Ignore it for other MOA types rather than trusting the client.
+  const effectiveCodedSelection = moaType === "sponsorship" ? codedSelection : undefined;
+
   try {
     const { runs, fullText, footers, pageSize, headerText } = await fetchDocument(docId, accessToken);
-    const { issues, leadTime } = await runAllChecks(fullText, moaType, { runs, footers, pageSize, headerText });
+    const { issues, leadTime } = await runAllChecks(fullText, moaType, {
+      runs,
+      footers,
+      pageSize,
+      headerText,
+      codedSelection: effectiveCodedSelection,
+    });
 
     // Write highlights + comments back into the doc for each issue we can locate.
     // Some issues (a missing required phrase, footer text — which lives in

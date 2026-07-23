@@ -97,6 +97,14 @@ const CANONICAL_FOOTER_TEXT = {
 // against a real one-line footer if it starts mis-flagging.
 const FOOTER_SINGLE_LINE_CHAR_THRESHOLD = 110;
 
+// The footer's 2nd line ("Page x of x") is its own templated field with a
+// different format than the "Memorandum of Agreement..." line — per
+// moa.md, ONLY the "Memorandum of Agreement..." line is the one that must
+// be shrunk down to fit a single line. "Page x of x" is a separate
+// paragraph by template design and must never be counted toward, or
+// flagged by, the one-line check.
+const PAGE_NUMBER_LINE_RE = /^page\s+\d+\s+of\s+\d+$/i;
+
 export function checkFooter(footers, moaType, canonicalOverride) {
   const issues = [];
   if (!footers || footers.length === 0) {
@@ -112,26 +120,40 @@ export function checkFooter(footers, moaType, canonicalOverride) {
     const text = footer.fullText.trim();
     if (!text) continue;
 
+    // Only the "Memorandum of Agreement..." line is subject to the
+    // one-line rule — split out (and ignore) the "Page x of x" line
+    // before counting paragraphs / measuring length.
+    const nonPageLines = footer.fullText
+      .split("\n")
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .filter((l) => !PAGE_NUMBER_LINE_RE.test(l));
+    const moaLineText = nonPageLines.join(" ");
+
     // (1) One line only — proxy via paragraph count and char length, since
     // Docs API doesn't expose actual rendered line-wrap state.
-    const paragraphCount = footer.fullText.split("\n").filter((l) => l.trim()).length;
-    if (paragraphCount > 1 || text.length > FOOTER_SINGLE_LINE_CHAR_THRESHOLD) {
+    if (nonPageLines.length > 1 || moaLineText.length > FOOTER_SINGLE_LINE_CHAR_THRESHOLD) {
       issues.push({
         type: "footer_not_one_line",
-        text,
+        text: moaLineText || text,
         message:
-          "The footer appears to wrap past one line (or contains multiple paragraphs). The footer must stay to a single line.",
+          'The footer\'s "Memorandum of Agreement..." line appears to wrap past one line (or contains multiple paragraphs of its own, not counting the separate "Page x of x" line). It must stay to a single line.',
       });
     }
 
     // (2) Consistency — checked once a canonical string is known, either
     // from the "Canonical Text" sheet tab (preferred, user-editable) or
-    // the hardcoded fallback above.
+    // the hardcoded fallback above. Internal MOAs' 1st line is freeform
+    // per moa.md ("Memorandum of Agreement re: Internal Partnership for
+    // [DLSU Event Name]", event name wording not strict) — this exact-
+    // match check is only meaningful if a canonical string has actually
+    // been configured for "internal" in the sheet; leave that row blank
+    // to keep Internal lenient.
     const canonical = canonicalOverride ?? CANONICAL_FOOTER_TEXT[moaType];
-    if (canonical && text !== canonical) {
+    if (canonical && moaLineText !== canonical) {
       issues.push({
         type: "footer_inconsistent",
-        text,
+        text: moaLineText || text,
         message: `Footer text doesn't match the expected wording for ${moaType} MOAs. Expected: "${canonical}".`,
       });
     }
@@ -219,7 +241,7 @@ function similarity(a, b) {
 
 const GTC_SIMILARITY_THRESHOLD = 0.95; // below this = "substantively edited"
 
-export function checkTopRightCode(fullText, moaType, canonicalOverride, headerText) {
+export function checkTopRightCode(fullText, moaType, canonicalOverride, headerText, codedSelection) {
   const issues = [];
   if (moaType !== "sponsorship" && moaType !== "internal") return issues; // Partnership handled separately (absence-only)
 
@@ -230,9 +252,57 @@ export function checkTopRightCode(fullText, moaType, canonicalOverride, headerTe
   const hasCode = /D-A-1a/i.test(headerText ?? fullText);
   const canonical = canonicalOverride ?? CANONICAL_GTC_TEXT[moaType];
 
-  if (!canonical) {
-    // Can't diff yet — just surface the presence/absence of the code so a
-    // human reviewer can judge, per moa.md ("up to MNL to check").
+  // A "coded" MOA follows the GTC→Dispute-Resolution section exactly per
+  // the template; the moment that section is substantively edited it
+  // becomes "non-coded". `isEdited` is the system's own ground-truth read
+  // of that (true = non-coded, false = coded), derived by diffing against
+  // the canonical text. It stays null when there's no canonical text to
+  // diff against yet.
+  let isEdited = null;
+
+  if (canonical) {
+    const section = extractGtcSection(fullText);
+    if (!section) {
+      issues.push({
+        type: "gtc_section_not_found",
+        text: GTC_SECTION_START,
+        message: "Could not locate the GTC→Dispute Resolution section to verify the top-right code.",
+      });
+      return issues;
+    }
+    const sim = similarity(section, canonical);
+    isEdited = sim < GTC_SIMILARITY_THRESHOLD;
+  }
+
+  // The popup lets the user pre-select "Coded" or "Non-coded" as a
+  // precaution before running the check (Sponsorship only). That
+  // selection never overrides what the document itself says — it's
+  // cross-checked against the system's own determination above, and
+  // flagged if it disagrees.
+  if (codedSelection === "coded" || codedSelection === "non_coded") {
+    const selectionSaysNonCoded = codedSelection === "non_coded";
+    if (isEdited !== null && isEdited !== selectionSaysNonCoded) {
+      issues.push({
+        type: "coded_selection_mismatch",
+        text: hasCode ? "D-A-1a" : "GENERAL TERMS AND CONDITIONS",
+        message: `You selected "${codedSelection === "coded" ? "Coded" : "Non-coded"}" before running this check, but the GTC→Dispute Resolution section ${
+          isEdited ? "appears to have been edited from" : "appears to match"
+        } the canonical template — which would make this MOA ${isEdited ? "Non-coded" : "Coded"}. Please double-check the selection.`,
+      });
+    }
+    // If we have no canonical text yet, fall back to trusting the user's
+    // selection as the working determination so the add/remove rule below
+    // can still run, rather than only surfacing a manual-check flag with
+    // no verdict at all.
+    if (isEdited === null) {
+      isEdited = selectionSaysNonCoded;
+    }
+  }
+
+  if (isEdited === null) {
+    // Can't diff yet, and no user selection to fall back on — just
+    // surface the presence/absence of the code so a human reviewer can
+    // judge, per moa.md ("up to MNL to check").
     issues.push({
       type: "top_right_code_needs_manual_check",
       text: hasCode ? "D-A-1a" : "GENERAL TERMS AND CONDITIONS",
@@ -243,32 +313,22 @@ export function checkTopRightCode(fullText, moaType, canonicalOverride, headerTe
     return issues;
   }
 
-  const section = extractGtcSection(fullText);
-  if (!section) {
+  // Coded (GTC unedited) → the header must have "D-A-1a"; if missing, add it.
+  // Non-coded (GTC edited) → the header must NOT have "D-A-1a"; if present, remove it.
+  // Otherwise, no comment — per moa.md, only these two cases get flagged.
+  if (!isEdited && !hasCode) {
     issues.push({
-      type: "gtc_section_not_found",
-      text: GTC_SECTION_START,
-      message: "Could not locate the GTC→Dispute Resolution section to verify the top-right code.",
-    });
-    return issues;
-  }
-
-  const sim = similarity(section, canonical);
-  const isEdited = sim < GTC_SIMILARITY_THRESHOLD;
-
-  if (isEdited && hasCode) {
-    issues.push({
-      type: "top_right_code_should_change",
-      text: "D-A-1a",
-      message:
-        "The GTC→Dispute Resolution section appears to differ from the canonical template, but the top-right code still reads \"D-A-1a\". It should be updated.",
-    });
-  } else if (!isEdited && !hasCode) {
-    issues.push({
-      type: "top_right_code_changed_without_cause",
+      type: "top_right_code_should_add",
       text: "GENERAL TERMS AND CONDITIONS",
       message:
-        'The GTC→Dispute Resolution section matches the canonical template, but the top-right code isn\'t "D-A-1a". Please confirm this change was intentional.',
+        'This MOA is Coded (the GTC→Dispute Resolution section matches the canonical template), but the top-right header is missing "D-A-1a". Please add it.',
+    });
+  } else if (isEdited && hasCode) {
+    issues.push({
+      type: "top_right_code_should_remove",
+      text: "D-A-1a",
+      message:
+        'This MOA is Non-coded (the GTC→Dispute Resolution section has been edited from the canonical template), but the top-right header still has "D-A-1a". Please remove it.',
     });
   }
 

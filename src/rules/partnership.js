@@ -16,8 +16,10 @@ export function checkPartnership(fullText, options = {}) {
         "wrong_undertaking_wording", // sponsorship says "sponsor", partnership says "partner" — checked separately below
         "missing_signatory_for_tier", // signatory tiers are a sponsorship-specific rule per moa.md, not defined for partnerships
         "top_right_code_needs_manual_check", // Partnership uses its own absence-only check below, not the Sponsorship diff logic
-        "top_right_code_should_change",
-        "top_right_code_changed_without_cause",
+        "top_right_code_should_add",
+        "top_right_code_should_remove",
+        "coded_selection_mismatch", // coded/non-coded is a Sponsorship-only concept
+        "gtc_section_not_found",
       ].includes(i.type)
   );
 
