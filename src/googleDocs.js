@@ -11,10 +11,42 @@ function authorizedClient(accessToken) {
 }
 
 /**
+ * Walks a Docs API "content" array (from doc.body.content or a footer's
+ * content array) and flattens it into a list of
+ * { text, startIndex, endIndex, bold } runs. Shared by fetchDocument()
+ * for the body and for each footer, since both are structured identically
+ * (arrays of StructuralElements -> paragraph -> elements -> textRun).
+ */
+function extractRuns(content) {
+  const runs = [];
+  for (const el of content || []) {
+    if (!el.paragraph) continue;
+    for (const pe of el.paragraph.elements || []) {
+      if (pe.textRun?.content) {
+        runs.push({
+          text: pe.textRun.content,
+          startIndex: pe.startIndex,
+          endIndex: pe.endIndex,
+          bold: !!pe.textRun.textStyle?.bold,
+        });
+      }
+    }
+  }
+  return runs;
+}
+
+/**
  * Fetches the full document JSON from the Docs API and flattens it into
- * a list of { text, startIndex, endIndex } runs, which is what the rule
- * engine works against. Google Docs indices are UTF-16 code unit offsets
- * within the doc body — required for later highlight/comment writes.
+ * a list of { text, startIndex, endIndex, bold } runs, which is what the
+ * rule engine works against. Google Docs indices are UTF-16 code unit
+ * offsets within the doc body — required for later highlight/comment
+ * writes. `bold` is read from textRun.textStyle.bold on each run so rules
+ * can check formatting, not just flattened text.
+ *
+ * Also extracts each Section's footer (footers live in doc.footers,
+ * keyed by footerId, and are NOT part of doc.body.content) and the
+ * document's page size, needed for the one-line-footer and
+ * one-page-signatory-block estimates.
  */
 export async function fetchDocument(docId, accessToken) {
   const auth = authorizedClient(accessToken);
@@ -23,25 +55,71 @@ export async function fetchDocument(docId, accessToken) {
   const res = await docs.documents.get({ documentId: docId });
   const doc = res.data;
 
-  const runs = [];
-  const content = doc.body?.content || [];
-
-  for (const el of content) {
-    if (!el.paragraph) continue;
-    for (const pe of el.paragraph.elements || []) {
-      if (pe.textRun?.content) {
-        runs.push({
-          text: pe.textRun.content,
-          startIndex: pe.startIndex,
-          endIndex: pe.endIndex,
-        });
-      }
-    }
-  }
-
+  const runs = extractRuns(doc.body?.content);
   const fullText = runs.map((r) => r.text).join("");
 
-  return { doc, runs, fullText };
+  // Footers: doc.footers is a map of footerId -> Footer object. Collect
+  // every distinct footer referenced by the document (default, first-page,
+  // even-page) rather than assuming a single footer, since a doc can
+  // define more than one.
+  const footerIds = new Set();
+  if (doc.documentStyle?.defaultFooterId) footerIds.add(doc.documentStyle.defaultFooterId);
+  if (doc.documentStyle?.firstPageFooterId) footerIds.add(doc.documentStyle.firstPageFooterId);
+  if (doc.documentStyle?.evenPageFooterId) footerIds.add(doc.documentStyle.evenPageFooterId);
+  for (const el of doc.body?.content || []) {
+    const sectionFooterId = el.sectionBreak?.sectionStyle?.defaultFooterId;
+    if (sectionFooterId) footerIds.add(sectionFooterId);
+  }
+  // Fallback: if nothing was referenced explicitly but doc.footers exists
+  // (e.g. simple single-section docs), include all of them.
+  if (footerIds.size === 0 && doc.footers) {
+    for (const id of Object.keys(doc.footers)) footerIds.add(id);
+  }
+
+  const footers = [...footerIds]
+    .filter((id) => doc.footers?.[id])
+    .map((footerId) => {
+      const footerRuns = extractRuns(doc.footers[footerId].content);
+      return {
+        footerId,
+        runs: footerRuns,
+        fullText: footerRuns.map((r) => r.text).join(""),
+      };
+    });
+
+  const pageSize = doc.documentStyle?.pageSize || null;
+
+  return { doc, runs, fullText, footers, pageSize };
+}
+
+/**
+ * Given a set of runs (with `bold` flags, as returned by extractRuns /
+ * fetchDocument) and a plain-text needle, checks whether the needle is
+ * bold in full. Handles needles that span multiple runs (e.g. because
+ * part of the phrase has a different formatting boundary) by requiring
+ * every contributing run to be bold. Returns:
+ *   - true  if found and every contributing run is bold
+ *   - false if found and at least one contributing run is not bold
+ *   - null  if the needle wasn't found at all (can't judge boldness)
+ */
+export function isTextBold(runs, needle) {
+  let joined = "";
+  const runIndexMap = []; // runIndexMap[i] = index into `runs` for joined[i]
+  runs.forEach((run, runIdx) => {
+    for (let i = 0; i < run.text.length; i++) runIndexMap.push(runIdx);
+    joined += run.text;
+  });
+
+  const idx = joined.indexOf(needle);
+  if (idx === -1) return null;
+
+  const involvedRunIdxs = new Set();
+  for (let i = idx; i < idx + needle.length; i++) involvedRunIdxs.add(runIndexMap[i]);
+
+  for (const runIdx of involvedRunIdxs) {
+    if (!runs[runIdx].bold) return false;
+  }
+  return true;
 }
 
 /**

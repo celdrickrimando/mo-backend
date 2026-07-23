@@ -7,9 +7,17 @@ import { checkSponsorship } from "./sponsorship.js";
 const NON_MONETARY_PHRASE = "does not involve monetary value";
 const MONETARY_PURCHASE_PHRASE = "monetary value but is a purchase in nature";
 
-export function checkPartnership(fullText) {
-  const issues = checkSponsorship(fullText).filter(
-    (i) => i.type !== "missing_sponsorship_tier" // sponsorship-only concept; partnership branch logic replaces it
+export function checkPartnership(fullText, options = {}) {
+  const issues = checkSponsorship(fullText, options).filter(
+    (i) =>
+      ![
+        "missing_sponsorship_tier", // sponsorship-only concept; branch logic below replaces it
+        "wrong_undertaking_wording", // sponsorship says "sponsor", partnership says "partner" — checked separately below
+        "missing_signatory_for_tier", // signatory tiers are a sponsorship-specific rule per moa.md, not defined for partnerships
+        "top_right_code_needs_manual_check", // Partnership uses its own absence-only check below, not the Sponsorship diff logic
+        "top_right_code_should_change",
+        "top_right_code_changed_without_cause",
+      ].includes(i.type)
   );
 
   const branch = detectUndertakingBranch(fullText);
@@ -34,6 +42,34 @@ export function checkPartnership(fullText) {
       text: "UNDERTAKING",
       message:
         "This Undertaking is marked as monetary/purchase-type, but no specific value/amount was found. Please state the amount or product value.",
+    });
+  }
+
+  // Undertaking wording: partnerships must say "commits to be a partner"
+  if (fullText.includes("UNDERTAKING") && !/commits to be a partner/i.test(fullText)) {
+    issues.push({
+      type: "wrong_undertaking_wording",
+      text: "UNDERTAKING",
+      message: 'Partnership MOAs must use the phrase "commits to be a partner" in the Undertaking clause.',
+    });
+  }
+
+  // Non-monetary partnerships must define media mileage the org will provide in return
+  if (branch === "non_monetary" && !/media mileage/i.test(fullText)) {
+    issues.push({
+      type: "missing_media_mileage",
+      text: "UNDERTAKING",
+      message:
+        "Non-monetary partnerships must specify the media mileage the organization will provide in return for the partner's contribution.",
+    });
+  }
+
+  // Partnerships do NOT use the top-right tracking code (D-A-1a) that Sponsorship/Internal MOAs use.
+  if (/D-A-1a/i.test(fullText)) {
+    issues.push({
+      type: "unexpected_top_right_code",
+      text: "D-A-1a",
+      message: "Partnership MOAs should not include the top-right tracking code — that applies to Sponsorship/Internal MOAs only.",
     });
   }
 

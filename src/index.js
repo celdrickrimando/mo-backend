@@ -2,6 +2,11 @@ import express from "express";
 import cors from "cors";
 import { fetchDocument, findRangeForText, highlightRange, addComment } from "./googleDocs.js";
 import { runAllChecks } from "./rules/index.js";
+import { clearRulesCache } from "./rulesSheet.js";
+
+// EDIT ME: shown after "Mo says a-ok" both in the Google Doc comment and in
+// the extension popup. Replace with whatever closing note your Committee wants.
+const AFTERWORD = "You may now proceed to submit this MOA to the MNL Committee.";
 
 const app = express();
 app.use(cors());
@@ -17,8 +22,8 @@ app.post("/check", async (req, res) => {
   }
 
   try {
-    const { runs, fullText } = await fetchDocument(docId, accessToken);
-    const { issues, leadTime } = runAllChecks(fullText, moaType);
+    const { runs, fullText, footers, pageSize } = await fetchDocument(docId, accessToken);
+    const { issues, leadTime } = await runAllChecks(fullText, moaType, { runs, footers, pageSize });
 
     // Write highlights + comments back into the doc for each issue we can locate.
     const writeResults = [];
@@ -51,7 +56,7 @@ app.post("/check", async (req, res) => {
             docId,
             accessToken,
             { startIndex: runs[0].startIndex, endIndex: runs[0].startIndex + 1 },
-            "Mo says a-ok. No issues found in this MOA."
+            `Mo says a-ok. No issues found in this MOA. ${AFTERWORD}`
           );
         } catch {
           // non-fatal — extension still reports a-ok even if the comment write fails
@@ -63,6 +68,7 @@ app.post("/check", async (req, res) => {
       issueCount: issues.length,
       markedCount,
       unmarkedCount,
+      afterword: issues.length === 0 ? AFTERWORD : null,
       leadTimeOk: leadTime.leadTimeOk,
       leadTimeDays: leadTime.leadTimeDays,
       requiredLeadTimeDays: leadTime.requiredLeadTimeDays,
@@ -76,6 +82,15 @@ app.post("/check", async (req, res) => {
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Manually clear the rules-sheet cache so a just-edited sheet takes
+// effect immediately instead of waiting for the ~2 minute TTL to expire.
+// No auth on this on purpose — it only clears a cache, it can't write
+// anything, so there's nothing sensitive to protect.
+app.post("/refresh-rules", (_req, res) => {
+  clearRulesCache();
+  res.json({ ok: true, message: "Rules cache cleared — next check will re-fetch the sheet." });
+});
 
 app.listen(PORT, () => {
   console.log(`Mo backend listening on http://localhost:${PORT}`);

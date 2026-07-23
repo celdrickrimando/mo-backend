@@ -1,7 +1,12 @@
 // Internal MOA checks — Mo_Rule_Checklist_Spec.md section 1
 
-export function checkInternal(fullText) {
+import { checkTopRightCode } from "./shared.js";
+
+export function checkInternal(fullText, { gtcCanonicalOverride } = {}) {
   const issues = [];
+
+  // Top-right tracking code (D-A-1a) correctness for Internal.
+  issues.push(...checkTopRightCode(fullText, "internal", gtcCanonicalOverride));
 
   // President representation check
   if (!/represented by its President/i.test(fullText)) {
