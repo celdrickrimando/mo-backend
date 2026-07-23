@@ -52,7 +52,18 @@ export async function fetchDocument(docId, accessToken) {
   const auth = authorizedClient(accessToken);
   const docs = google.docs({ version: "v1", auth });
 
-  const res = await docs.documents.get({ documentId: docId });
+  let res;
+  try {
+    res = await docs.documents.get({ documentId: docId });
+  } catch (err) {
+    const googleMessage = err?.errors?.[0]?.message || err?.message || "";
+    if (googleMessage.includes("must not be an Office file")) {
+      throw new Error(
+        "This looks like an uploaded Word file (.docx), not a native Google Doc — Mo can only check native Google Docs. Open it and use File → Save as Google Docs, then run Mo on that new copy."
+      );
+    }
+    throw err;
+  }
   const doc = res.data;
 
   const runs = extractRuns(doc.body?.content);
