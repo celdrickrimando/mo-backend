@@ -29,6 +29,20 @@ function extractRuns(content) {
           endIndex: pe.endIndex,
           bold: !!pe.textRun.textStyle?.bold,
         });
+      } else if (pe.autoText) {
+        // Page number / page count fields (footer "Page X") render their
+        // text dynamically and have no literal `content` string, but they
+        // do carry their own textStyle. Track them as a zero-length run
+        // with isPageNumber set so footer checks can judge their bold
+        // state independently from the surrounding text instead of the
+        // field silently vanishing from the run list.
+        runs.push({
+          text: "",
+          startIndex: pe.startIndex,
+          endIndex: pe.endIndex,
+          bold: !!pe.autoText.textStyle?.bold,
+          isPageNumber: pe.autoText.type === "PAGE_NUMBER",
+        });
       }
     }
   }
@@ -234,19 +248,33 @@ export async function highlightRange(docId, accessToken, range, color = { red: 1
  * Drive API, not the Docs API — this uses anchored replies via the
  * "anchor" field referencing the doc's revision + range.
  *
- * IMPORTANT: the "r" field must be the document's actual current
- * revision ID (a real string Google assigns, e.g. from
- * `files.get({fields: "headRevisionId"})`) — NOT the literal word
- * "head". Passing the literal string silently produces an invalid
- * anchor: the comment gets created (no error thrown) but doesn't
- * actually attach to the range the way a real Ctrl+Alt+M comment does.
+ * IMPORTANT: the "r" field must be the Docs API's own revisionId
+ * (`documents.get().data.revisionId`) — NOT Drive's `headRevisionId`.
+ * These are two different ID spaces/formats: `headRevisionId` belongs to
+ * the Drive Revisions resource (built for binary files/Sheets), while
+ * the anchor format Google Docs' own comment UI writes expects the
+ * Docs-native revisionId. Passing the Drive one silently produces an
+ * invalid anchor: `comments.create` succeeds (no error thrown, since
+ * Drive doesn't validate that string against Docs internals) but the
+ * comment never actually attaches to the range the way a real
+ * Ctrl+Alt+M comment does — it just floats, unanchored.
+ *
+ * Also: fetch this fresh right here, not earlier in the request. If a
+ * highlightRange() batchUpdate ran first (as it does in index.js), the
+ * doc's revisionId has already moved forward by the time we comment —
+ * using a revisionId captured before that edit would anchor against a
+ * revision that's no longer current.
  */
 export async function addComment(docId, accessToken, range, message) {
   const auth = authorizedClient(accessToken);
+  const docs = google.docs({ version: "v1", auth });
   const drive = google.drive({ version: "v3", auth });
 
-  const fileMeta = await drive.files.get({ fileId: docId, fields: "headRevisionId" });
-  const revisionId = fileMeta.data.headRevisionId;
+  const { data } = await docs.documents.get({
+    documentId: docId,
+    fields: "revisionId",
+  });
+  const revisionId = data.revisionId;
 
   const anchor = JSON.stringify({
     r: revisionId,

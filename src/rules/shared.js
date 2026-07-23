@@ -136,20 +136,33 @@ export function checkFooter(footers, moaType, canonicalOverride) {
       });
     }
 
-    // (3) Bold retained — flag if the footer has a mix of bold and
-    // non-bold runs (i.e. bold was partially lost) or lost bold entirely
-    // despite the template always shipping this footer bolded.
-    const nonWhitespaceRuns = footer.runs.filter((r) => r.text.trim());
-    if (nonWhitespaceRuns.length > 0) {
-      const boldStates = new Set(nonWhitespaceRuns.map((r) => r.bold));
+    // (3) Bold retained — the footer has two distinct pieces that must be
+    // judged separately: the "Memorandum of Agreement..." line (must be
+    // bold throughout) and the page-number field (must NOT be bold).
+    // Lumping both into one uniform check used to flag a correctly-built
+    // footer as broken, since the page number is legitimately non-bold.
+    const textRuns = footer.runs.filter((r) => r.text.trim() && !r.isPageNumber);
+    const pageNumberRuns = footer.runs.filter((r) => r.isPageNumber);
+
+    if (textRuns.length > 0) {
+      const boldStates = new Set(textRuns.map((r) => r.bold));
       if (boldStates.size > 1 || boldStates.has(false)) {
         issues.push({
           type: "footer_bold_not_retained",
           text,
           message:
-            "Part or all of the footer text has lost its bold formatting. The footer may be resized but must stay bold.",
+            'Part or all of the footer\'s "Memorandum of Agreement..." text has lost its bold formatting. That line may be resized but must stay bold.',
         });
       }
+    }
+
+    if (pageNumberRuns.some((r) => r.bold)) {
+      issues.push({
+        type: "footer_page_number_bold",
+        text,
+        message:
+          "The page number in the footer is bold — it should not be. Only the \"Memorandum of Agreement...\" text should be bold.",
+      });
     }
   }
 
