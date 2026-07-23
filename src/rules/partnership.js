@@ -8,6 +8,7 @@ const NON_MONETARY_PHRASE = "does not involve monetary value";
 const MONETARY_PURCHASE_PHRASE = "monetary value but is a purchase in nature";
 
 export function checkPartnership(fullText, options = {}) {
+  const { headerText } = options;
   const issues = checkSponsorship(fullText, options).filter(
     (i) =>
       ![
@@ -64,8 +65,11 @@ export function checkPartnership(fullText, options = {}) {
     });
   }
 
-  // Partnerships do NOT use the top-right tracking code (D-A-1a) that Sponsorship/Internal MOAs use.
-  if (/D-A-1a/i.test(fullText)) {
+  // Partnerships do NOT use the top-right tracking code (D-A-1a) that
+  // Sponsorship/Internal MOAs use. The code lives in the document HEADER,
+  // not the body, so check headerText (falling back to fullText only if
+  // no header was supplied).
+  if (/D-A-1a/i.test(headerText ?? fullText)) {
     issues.push({
       type: "unexpected_top_right_code",
       text: "D-A-1a",

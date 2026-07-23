@@ -22,19 +22,25 @@ app.post("/check", async (req, res) => {
   }
 
   try {
-    const { runs, fullText, footers, pageSize } = await fetchDocument(docId, accessToken);
-    const { issues, leadTime } = await runAllChecks(fullText, moaType, { runs, footers, pageSize });
+    const { runs, fullText, footers, pageSize, headerText } = await fetchDocument(docId, accessToken);
+    const { issues, leadTime } = await runAllChecks(fullText, moaType, { runs, footers, pageSize, headerText });
 
     // Write highlights + comments back into the doc for each issue we can locate.
+    // Some issues (a missing required phrase, footer text — which lives in
+    // a separate index space from the body) have no locatable range at
+    // all. Rather than silently dropping those from the doc, fall back to
+    // a general comment anchored at the top of the document, so nothing a
+    // reviewer needs to see gets lost — only the precise highlight is
+    // missing, not the note itself.
     const writeResults = [];
     let markedCount = 0;
     let unmarkedCount = 0;
+    const generalNotes = [];
 
     for (const issue of issues) {
       const range = findRangeForText(runs, issue.text);
       if (!range) {
-        writeResults.push({ issue: issue.type, message: issue.message, written: false, reason: "text not found in doc" });
-        unmarkedCount++;
+        generalNotes.push(issue);
         continue;
       }
       try {
@@ -44,6 +50,34 @@ app.post("/check", async (req, res) => {
         markedCount++;
       } catch (err) {
         writeResults.push({ issue: issue.type, message: issue.message, written: false, reason: err.message });
+        unmarkedCount++;
+      }
+    }
+
+    if (generalNotes.length > 0 && runs[0]) {
+      const combinedMessage =
+        "Mo found the following issue(s) that couldn't be pinpointed to exact text in the document (e.g. something missing, or footer text):\n\n" +
+        generalNotes.map((n, i) => `${i + 1}. ${n.message}`).join("\n\n");
+      try {
+        await addComment(
+          docId,
+          accessToken,
+          { startIndex: runs[0].startIndex, endIndex: runs[0].startIndex + 1 },
+          combinedMessage
+        );
+        for (const n of generalNotes) {
+          writeResults.push({ issue: n.type, message: n.message, written: true, reason: "general comment at top of doc — couldn't pinpoint exact text" });
+          markedCount++;
+        }
+      } catch (err) {
+        for (const n of generalNotes) {
+          writeResults.push({ issue: n.type, message: n.message, written: false, reason: `couldn't locate text, and general comment failed: ${err.message}` });
+          unmarkedCount++;
+        }
+      }
+    } else {
+      for (const n of generalNotes) {
+        writeResults.push({ issue: n.type, message: n.message, written: false, reason: "text not found in doc" });
         unmarkedCount++;
       }
     }

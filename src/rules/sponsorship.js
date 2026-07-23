@@ -3,11 +3,11 @@
 import { checkSignatoryTier } from "./signatoryTiers.js";
 import { checkFonEitherOr, checkTopRightCode } from "./shared.js";
 
-export function checkSponsorship(fullText, { gtcCanonicalOverride, signatoryTiersOverride } = {}) {
+export function checkSponsorship(fullText, { gtcCanonicalOverride, signatoryTiersOverride, headerText } = {}) {
   const issues = [];
 
   // Top-right tracking code (D-A-1a) correctness for Sponsorship.
-  issues.push(...checkTopRightCode(fullText, "sponsorship", gtcCanonicalOverride));
+  issues.push(...checkTopRightCode(fullText, "sponsorship", gtcCanonicalOverride, headerText));
 
   // Sponsorship tier / value must be present in the UNDERTAKING clause
   const undertakingIdx = fullText.indexOf("UNDERTAKING");
@@ -41,13 +41,17 @@ export function checkSponsorship(fullText, { gtcCanonicalOverride, signatoryTier
   // Stipulation punctuation — every "; and" list must terminate the final item with a period
   issues.push(...checkStipulationPunctuation(fullText));
 
-  // The specific closing report-submission clause must always be the last item
-  if (!/Submit to the [A-Za-z\s]*a report of the activity within one week after the activity/i.test(fullText)) {
+  // The closing stipulation must require a post-activity report submitted
+  // within roughly a week. Accepts reworded equivalents (e.g. "Post-Activity
+  // Report... within seven (7) calendar days..."), not just moa.md's exact
+  // original phrasing, since real approved MOAs vary this wording — only
+  // the substance (a report, required within ~a week) needs to be present.
+  if (!hasFinalReportStipulation(fullText)) {
     issues.push({
       type: "missing_required_final_stipulation",
       text: "UNDERTAKING",
       message:
-        'The stipulation "Submit to the [Short Company Name] a report of the activity within one week after the activity" must always be present as the final item in the list.',
+        'A closing stipulation requiring a post-activity report within about a week (e.g. "Submit ... a report of the activity within one week after the activity", or an equivalent like "Post-Activity Report ... within seven (7) calendar days") must be present as the final item in the list.',
     });
   }
 
@@ -117,4 +121,34 @@ function checkStipulationPunctuation(fullText) {
   }
 
   return issues;
+}
+
+/**
+ * Looks for a "report ... within ~a week" requirement anywhere near the
+ * word "report", accepting reworded equivalents rather than requiring
+ * moa.md's exact original phrase. Matches "one week", "seven (7) days" /
+ * "seven (7) calendar days", or any explicit day count of 10 or fewer
+ * (roughly "about a week") within ~200 characters of "report".
+ */
+function hasFinalReportStipulation(fullText) {
+  const reportRegex = /report/gi;
+  let match;
+  while ((match = reportRegex.exec(fullText))) {
+    const windowStart = Math.max(0, match.index - 200);
+    const windowEnd = Math.min(fullText.length, match.index + 200);
+    const window = fullText.slice(windowStart, windowEnd);
+
+    const timeMatch = window.match(
+      /within\s+(?:one\s+week|seven\s*\(?7\)?\s*(?:calendar\s+)?days?|(\d+)\s*(?:calendar\s+)?days?)/i
+    );
+    if (timeMatch) {
+      if (timeMatch[1]) {
+        const days = parseInt(timeMatch[1], 10);
+        if (days <= 10) return true;
+      } else {
+        return true; // matched "one week" or "seven (7) [calendar] days" explicitly
+      }
+    }
+  }
+  return false;
 }

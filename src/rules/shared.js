@@ -206,11 +206,15 @@ function similarity(a, b) {
 
 const GTC_SIMILARITY_THRESHOLD = 0.95; // below this = "substantively edited"
 
-export function checkTopRightCode(fullText, moaType, canonicalOverride) {
+export function checkTopRightCode(fullText, moaType, canonicalOverride, headerText) {
   const issues = [];
   if (moaType !== "sponsorship" && moaType !== "internal") return issues; // Partnership handled separately (absence-only)
 
-  const hasCode = /D-A-1a/i.test(fullText);
+  // The top-right tracking code lives in the document HEADER, not the
+  // body — check headerText if given, falling back to fullText only if
+  // no header was supplied (e.g. older callers/tests), so this doesn't
+  // hard-crash on missing data, just loses accuracy.
+  const hasCode = /D-A-1a/i.test(headerText ?? fullText);
   const canonical = canonicalOverride ?? CANONICAL_GTC_TEXT[moaType];
 
   if (!canonical) {
@@ -370,22 +374,32 @@ export function checkLeadTime(fullText, moaType) {
 
 export function checkFonEitherOr(fullText) {
   const issues = [];
-  const hasCompanyPhrase = /a company registered with the law of the Republic of the Philippines/i.test(fullText);
-  const hasSchoolPhrase = /a recognized organization of [A-Z][A-Za-z\s.]+/i.test(fullText);
+
+  // Scope to only the counterparty's own party-description clause — the
+  // text BEFORE DLSU's section begins. Every MOA (even a correct one)
+  // contains "a recognized organization of De La Salle University" in
+  // DLSU's own fixed boilerplate later in the document, which would
+  // otherwise always false-positive as if it were the counterparty's
+  // leftover alternate phrase.
+  const dlsuIdx = fullText.search(/DE LA SALLE UNIVERSITY/i);
+  const counterpartyText = dlsuIdx === -1 ? fullText : fullText.slice(0, dlsuIdx);
+
+  const hasCompanyPhrase = /a company registered with the law of the Republic of the Philippines/i.test(counterpartyText);
+  const hasSchoolPhrase = /a recognized organization of [A-Z][A-Za-z\s.]+/i.test(counterpartyText);
 
   if (hasCompanyPhrase && hasSchoolPhrase) {
     issues.push({
       type: "fon_both_options_present",
       text: "a company registered with the law of the Republic of the Philippines",
       message:
-        'Both party-type options are present ("a company registered..." AND "a recognized organization of..."). Keep only the one that applies to the counterparty and delete the other.',
+        'Both party-type options are present ("a company registered..." AND "a recognized organization of...") in the counterparty\'s clause. Keep only the one that applies and delete the other.',
     });
   } else if (!hasCompanyPhrase && !hasSchoolPhrase) {
     issues.push({
       type: "fon_missing_party_type",
       text: "FULL COMPANY NAME",
       message:
-        'Neither party-type phrase is present. State whether the counterparty is "a company registered with the law of the Republic of the Philippines" or "a recognized organization of [University Name]".',
+        'Neither party-type phrase is present in the counterparty\'s clause. State whether the counterparty is "a company registered with the law of the Republic of the Philippines" or "a recognized organization of [University Name]".',
     });
   }
 

@@ -31,7 +31,7 @@ export async function runAllChecks(fullText, moaType, docContext = {}) {
     throw new Error(`Unknown MOA type: ${moaType}`);
   }
 
-  const { runs, footers, pageSize } = docContext;
+  const { runs, footers, pageSize, headerText } = docContext;
   const rulesConfig = await getRulesConfig();
 
   const footerCanonicalOverride = getCanonicalTextFromSheet(rulesConfig, moaType, "Footer");
@@ -40,7 +40,7 @@ export async function runAllChecks(fullText, moaType, docContext = {}) {
 
   const issues = [
     ...runSharedChecks(fullText, { runs, footers, pageSize, moaType, footerCanonicalOverride }),
-    ...typeChecker(fullText, { gtcCanonicalOverride, signatoryTiersOverride }),
+    ...typeChecker(fullText, { gtcCanonicalOverride, signatoryTiersOverride, headerText }),
     ...runAllSheetDrivenRules(fullText, moaType, rulesConfig),
   ];
   const leadTime = checkLeadTime(fullText, moaType);

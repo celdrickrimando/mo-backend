@@ -100,7 +100,35 @@ export async function fetchDocument(docId, accessToken) {
 
   const pageSize = doc.documentStyle?.pageSize || null;
 
-  return { doc, runs, fullText, footers, pageSize };
+  // Headers: same shape/reasoning as footers above — doc.headers is a map
+  // of headerId -> Header object, NOT part of doc.body.content. This is
+  // where the top-right tracking code (e.g. "D-A-1a") actually lives, so
+  // checkTopRightCode() needs this, not just body fullText.
+  const headerIds = new Set();
+  if (doc.documentStyle?.defaultHeaderId) headerIds.add(doc.documentStyle.defaultHeaderId);
+  if (doc.documentStyle?.firstPageHeaderId) headerIds.add(doc.documentStyle.firstPageHeaderId);
+  if (doc.documentStyle?.evenPageHeaderId) headerIds.add(doc.documentStyle.evenPageHeaderId);
+  for (const el of doc.body?.content || []) {
+    const sectionHeaderId = el.sectionBreak?.sectionStyle?.defaultHeaderId;
+    if (sectionHeaderId) headerIds.add(sectionHeaderId);
+  }
+  if (headerIds.size === 0 && doc.headers) {
+    for (const id of Object.keys(doc.headers)) headerIds.add(id);
+  }
+
+  const headers = [...headerIds]
+    .filter((id) => doc.headers?.[id])
+    .map((headerId) => {
+      const headerRuns = extractRuns(doc.headers[headerId].content);
+      return {
+        headerId,
+        runs: headerRuns,
+        fullText: headerRuns.map((r) => r.text).join(""),
+      };
+    });
+  const headerText = headers.map((h) => h.fullText).join("\n");
+
+  return { doc, runs, fullText, footers, headers, headerText, pageSize };
 }
 
 /**
@@ -205,13 +233,23 @@ export async function highlightRange(docId, accessToken, range, color = { red: 1
  * Adds a native comment anchored to a text range. Comments live in the
  * Drive API, not the Docs API — this uses anchored replies via the
  * "anchor" field referencing the doc's revision + range.
+ *
+ * IMPORTANT: the "r" field must be the document's actual current
+ * revision ID (a real string Google assigns, e.g. from
+ * `files.get({fields: "headRevisionId"})`) — NOT the literal word
+ * "head". Passing the literal string silently produces an invalid
+ * anchor: the comment gets created (no error thrown) but doesn't
+ * actually attach to the range the way a real Ctrl+Alt+M comment does.
  */
 export async function addComment(docId, accessToken, range, message) {
   const auth = authorizedClient(accessToken);
   const drive = google.drive({ version: "v3", auth });
 
+  const fileMeta = await drive.files.get({ fileId: docId, fields: "headRevisionId" });
+  const revisionId = fileMeta.data.headRevisionId;
+
   const anchor = JSON.stringify({
-    r: "head",
+    r: revisionId,
     a: [
       {
         txt: {
