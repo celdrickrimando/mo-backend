@@ -40,16 +40,18 @@ export async function runAllChecks(fullText, moaType, docContext = {}) {
 
   const issues = [
     ...runSharedChecks(fullText, {
-      // In PDF mode, runs/images/footers/pageSize are all undefined —
-      // runSharedChecks' own checks already guard on these being present
-      // (see checkPayeeClause's `if (runs)`, checkFooter's
+      // In PDF mode, runs/images/footers/pageSize/pageBreaks are all
+      // undefined — runSharedChecks' own checks already guard on these
+      // being present (see checkPayeeClause's `if (runs)`, checkFooter's
       // `if (!footers || footers.length === 0)` special-case, etc.) —
-      // EXCEPT checkFooter and checkOnePageSignatoryBlock, which need an
-      // explicit pdfMode skip below since they otherwise treat "absent"
-      // as "definitely missing/unknown" and would always misfire in PDF
-      // mode. See Feature 3 in MO_NEXT_STEPS.md.
+      // EXCEPT checkFooter, checkOnePageSignatoryBlock, and
+      // checkSignatoryBlockPageBreak, which need an explicit pdfMode skip
+      // below since they otherwise treat "absent" as "definitely
+      // missing/unknown" and would always misfire in PDF mode. See
+      // Feature 3 in MO_NEXT_STEPS.md.
       runs,
       images,
+      pageBreaks,
       footers,
       pageSize,
       moaType,
@@ -66,10 +68,6 @@ export async function runAllChecks(fullText, moaType, docContext = {}) {
       headerText: pdfMode ? undefined : headerText,
       codedSelection,
       pdfMode,
-      // runs/pageBreaks are undefined in PDF mode (no structural position
-      // data) — checkInternal's page-break check already guards on that.
-      runs,
-      pageBreaks,
     }),
     ...runAllSheetDrivenRules(fullText, moaType, rulesConfig),
   ];

@@ -444,6 +444,88 @@ export function checkTopRightCode(fullText, moaType, canonicalOverride, headerTe
 }
 
 /**
+ * moa.md/reviewer guidance: the signatory block should start with a page
+ * break right after the "IN WITNESS WHEREOF, the parties set their
+ * hands... abovementioned:" sentence, before the org-name table heading
+ * that follows it. The Docs API DOES expose explicit manual page breaks
+ * (Insert > Break > Page break) as their own structural element —
+ * extractRuns() in googleDocs.js captures these as `pageBreaks` — so this
+ * checks for one positioned shortly after the anchor sentence, instead of
+ * always asking for a manual check.
+ *
+ * Originally an Internal-only check (the anchor sentence and the
+ * immediately-following heading are identical boilerplate across all
+ * three MOA types — moa.md's page-break guidance was never actually
+ * type-specific, only the check itself hadn't been extended yet). Moved
+ * here so all three types share one implementation instead of drifting
+ * apart.
+ *
+ * If an explicit page break is found there, no issue is raised at all —
+ * confirmed correct, no manual check needed.
+ *
+ * If none is found, this can't tell "the break is genuinely missing"
+ * apart from "the page split naturally without an inserted break, which
+ * may still be fine" (the Docs API doesn't expose natural/rendered page
+ * boundaries, only explicit ones) — so THAT case still surfaces a
+ * manual-check reminder, but a dismissible one: once a reviewer confirms
+ * it by eye, they can mark it resolved from the popup and it won't be
+ * re-raised on later checks of this document (see DISMISSIBLE_ISSUE_CODES
+ * / dismissIssueType in googleDocs.js and index.js's dismissed-issue
+ * filtering).
+ */
+const PAGE_BREAK_SEARCH_WINDOW = 500; // chars after the anchor sentence to look for a break in
+
+export function checkSignatoryBlockPageBreak(fullText, runs, pageBreaks) {
+  const issues = [];
+  const anchor = "IN WITNESS WHEREOF";
+  const anchorIdx = fullText.indexOf(anchor);
+  if (anchorIdx === -1) return issues; // missing_required_section already flags this
+
+  // No structural data available (e.g. runs/pageBreaks not supplied) —
+  // can't do the real check, fall back to the dismissible reminder.
+  if (!runs || !pageBreaks) {
+    issues.push(pageBreakManualCheckIssue());
+    return issues;
+  }
+
+  // Map the fullText character offset of the anchor to its absolute Docs
+  // API index by walking `runs` (fullText is the concatenation of
+  // runs[].text in order) — same approach as draftStage.js.
+  let charsSeen = 0;
+  let anchorAbsoluteIndex = null;
+  for (const run of runs) {
+    if (charsSeen + run.text.length > anchorIdx) {
+      anchorAbsoluteIndex = run.startIndex + (anchorIdx - charsSeen);
+      break;
+    }
+    charsSeen += run.text.length;
+  }
+  if (anchorAbsoluteIndex === null) {
+    issues.push(pageBreakManualCheckIssue());
+    return issues;
+  }
+
+  const hasBreakAfterAnchor = pageBreaks.some(
+    (pb) => pb.startIndex >= anchorAbsoluteIndex && pb.startIndex <= anchorAbsoluteIndex + PAGE_BREAK_SEARCH_WINDOW
+  );
+
+  if (!hasBreakAfterAnchor) {
+    issues.push(pageBreakManualCheckIssue());
+  }
+
+  return issues;
+}
+
+function pageBreakManualCheckIssue() {
+  return {
+    type: "signatory_block_page_break_needs_manual_check",
+    text: "IN WITNESS WHEREOF",
+    message:
+      'Please manually confirm: the signatory block starts with a page break right after "IN WITNESS WHEREOF, the parties set their hands...", before the org-name table heading that follows, and all signatories (both parties, through the "Witnessed by" names) fit on that one page. No explicit page break was detected there automatically — this may just mean the page split naturally, which the checker can\'t read; please verify by eye. Once confirmed, you can mark this resolved so it stops appearing on future checks of this document.',
+  };
+}
+
+/**
  * One-page signatory block estimate. moa.md: all signatories must fit on
  * one printed page. The Docs API doesn't expose page boundaries for
  * natural text overflow (only explicit pageBreak elements), so this is an
@@ -645,7 +727,7 @@ export function checkNameHonorifics(fullText, moaType) {
   return issues;
 }
 
-export function runSharedChecks(fullText, { runs, images, footers, pageSize, moaType, footerCanonicalOverride, pdfMode } = {}) {
+export function runSharedChecks(fullText, { runs, images, pageBreaks, footers, pageSize, moaType, footerCanonicalOverride, pdfMode } = {}) {
   return [
     ...checkPlaceholders(fullText, moaType),
     ...checkRequiredSections(fullText),
@@ -653,6 +735,9 @@ export function runSharedChecks(fullText, { runs, images, footers, pageSize, moa
     ...(pdfMode ? [] : checkFooter(footers, moaType, footerCanonicalOverride)),
     ...(pdfMode ? [] : checkFooterMatchesTitle(fullText, footers)),
     ...(pdfMode ? [] : checkOnePageSignatoryBlock(fullText, pageSize)),
+    // Applies to all three MOA types — see checkSignatoryBlockPageBreak's
+    // doc comment for why this moved here from being Internal-only.
+    ...(pdfMode ? [] : checkSignatoryBlockPageBreak(fullText, runs, pageBreaks)),
     ...checkNameHonorifics(fullText, moaType),
     ...(pdfMode ? [] : checkNoSignaturesInDraft(fullText, runs, images)),
   ];
