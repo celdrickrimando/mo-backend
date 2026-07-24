@@ -39,7 +39,6 @@ export function checkInternal(fullText, { pdfMode } = {}) {
     });
   }
 
-  issues.push(...checkPresidentInSignatoryBlock(fullText));
   issues.push(...checkEventDateFormat(fullText));
   issues.push(...checkSignatoryBlockPageBreak(fullText));
 
@@ -47,42 +46,27 @@ export function checkInternal(fullText, { pdfMode } = {}) {
 }
 
 /**
- * Both parties' representatives in the FINAL signatory block (not just
- * the opening "represented by its President" clause) must be shown as
- * President (or an explicitly-noted equivalent). Heuristic: count
- * "President" occurrences after "IN WITNESS WHEREOF" — the template has
- * two (one per party column), so fewer than two suggests one column's
- * title was swapped for something else. Best-effort text heuristic, not
- * a structural read of the actual table layout — flag as such in the
- * message rather than asserting it with full confidence.
+ * NOTE: a "President must appear in the signatory block" check was tried
+ * here and removed. The template's own guidance allows "(or equivalent)"
+ * — real orgs legitimately use titles like "Chairperson" or "Executive
+ * Vice Chairperson for Externals" for one party while the other uses
+ * "President"/"Vice President", and a plain text count of the word
+ * "President" can't reliably tell a legitimate equivalent apart from an
+ * actual omission (confirmed against a real filled-in Internal MOA,
+ * where it false-positived). Automating this properly would need
+ * knowing each org's actual designated-equivalent title, which isn't
+ * available to a text-only check — left as a fully manual review item
+ * instead of a noisy automatic flag.
  */
-function checkPresidentInSignatoryBlock(fullText) {
-  const issues = [];
-  const witnessIdx = fullText.indexOf("IN WITNESS WHEREOF");
-  if (witnessIdx === -1) return issues; // missing_required_section already flags this
-
-  const block = fullText.slice(witnessIdx);
-  const presidentCount = (block.match(/president/gi) || []).length;
-
-  if (presidentCount < 2) {
-    issues.push({
-      type: "president_missing_from_signatory_block",
-      text: "IN WITNESS WHEREOF",
-      message:
-        'Both parties\' representatives must always be shown as President (or an explicitly noted equivalent) in the final signatory block, not just in the opening "represented by its President" clause. "President" appears fewer than expected times in that block — please confirm both signatories are shown correctly.',
-    });
-  }
-
-  return issues;
-}
 
 /**
- * Required event date range format: "Month DD, YYYY, to Month DD, YYYY"
- * (e.g. "October 20, 2024, to November 20, 2024") — proper Title Case
- * months, comma before "to". This is an Internal-specific convention;
- * Sponsorship/Partnership documents legitimately use ALL CAPS dates
- * instead (see extractLeadTimeDates in shared.js), so this check is
- * intentionally NOT shared across MOA types.
+ * Required event date range shape: two valid "Month DD, YYYY" dates
+ * joined by "to" (e.g. "JUNE 19, 2026 to JUNE 26, 2026" or "October 20,
+ * 2024, to November 20, 2024" are both fine). Confirmed with the user
+ * that neither the comma before "to" nor Title Case months are actually
+ * required — real documents legitimately use ALL CAPS with no comma, the
+ * same as Sponsorship/Partnership. This only flags when the range can't
+ * be matched at all, not on comma/casing style.
  */
 function checkEventDateFormat(fullText) {
   const issues = [];
@@ -91,7 +75,7 @@ function checkEventDateFormat(fullText) {
 
   const window = fullText.slice(idx, idx + 200);
   const rangeMatch = window.match(
-    /to be held on\s+([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})(,)?\s+to\s+([A-Za-z]+)\s+(\d{1,2}),\s+(\d{4})/
+    /to be held on\s+[A-Za-z]+\s+\d{1,2},\s+\d{4},?\s+to\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}/i
   );
 
   if (!rangeMatch) {
@@ -99,25 +83,7 @@ function checkEventDateFormat(fullText) {
       type: "event_date_format_unclear",
       text: "to be held on",
       message:
-        'Could not confidently match the event date range against the required format ("Month DD, YYYY, to Month DD, YYYY", e.g. "October 20, 2024, to November 20, 2024"). Please verify manually.',
-    });
-    return issues;
-  }
-
-  const [, month1, , , comma, month2] = rangeMatch;
-  const isTitleCase = (m) => /^[A-Z][a-z]+$/.test(m);
-
-  const problems = [];
-  if (!comma) problems.push('missing the comma before "to"');
-  if (!isTitleCase(month1) || !isTitleCase(month2)) {
-    problems.push('month names should be written in standard Title Case (e.g. "October", not "OCTOBER" or "october")');
-  }
-
-  if (problems.length > 0) {
-    issues.push({
-      type: "event_date_format_incorrect",
-      text: rangeMatch[0],
-      message: `Event date range doesn't match the required format ("October 20, 2024, to November 20, 2024"): ${problems.join("; ")}.`,
+        'Could not confidently match the event date range against the required shape ("Month DD, YYYY to Month DD, YYYY"). Please verify manually.',
     });
   }
 

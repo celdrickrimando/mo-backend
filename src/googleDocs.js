@@ -320,6 +320,104 @@ export async function highlightRange(docId, accessToken, range, color = { red: 1
 }
 
 /**
+ * The exact highlight color highlightRange() applies by default. Named
+ * here (not just inlined) so clearAllMoHighlights() below searches for
+ * precisely the color highlightRange() writes — if that default is ever
+ * changed, both call sites move together instead of silently drifting
+ * apart and leaving old-color highlights undetectable by cleanup.
+ */
+const MO_HIGHLIGHT_COLOR = { red: 1, green: 0.93, blue: 0.75 };
+const COLOR_MATCH_EPSILON = 0.01; // float tolerance for rgbColor component equality
+
+function colorsMatch(rgbColor) {
+  if (!rgbColor) return false;
+  const { red = 0, green = 0, blue = 0 } = rgbColor;
+  return (
+    Math.abs(red - MO_HIGHLIGHT_COLOR.red) < COLOR_MATCH_EPSILON &&
+    Math.abs(green - MO_HIGHLIGHT_COLOR.green) < COLOR_MATCH_EPSILON &&
+    Math.abs(blue - MO_HIGHLIGHT_COLOR.blue) < COLOR_MATCH_EPSILON
+  );
+}
+
+function findHighlightedRanges(content) {
+  const ranges = [];
+  for (const el of content || []) {
+    if (!el.paragraph) continue;
+    for (const pe of el.paragraph.elements || []) {
+      const bg = pe.textRun?.textStyle?.backgroundColor?.color?.rgbColor;
+      if (colorsMatch(bg)) {
+        ranges.push({ startIndex: pe.startIndex, endIndex: pe.endIndex });
+      }
+    }
+  }
+  return ranges;
+}
+
+/**
+ * Clears every highlight Mo previously applied (matched by exact color,
+ * see MO_HIGHLIGHT_COLOR), across the body and every header/footer.
+ * Comments were being cleaned up each run (cleanupPreviousMoComments) but
+ * the actual highlight formatting underneath them was not — so a
+ * resolved/stale comment's highlight color stayed in the document
+ * forever. Call this alongside cleanupPreviousMoComments(), BEFORE
+ * writing this run's new highlights.
+ *
+ * Reuses the `doc` object already returned by fetchDocument() for this
+ * same /check call rather than re-fetching — any highlight color found
+ * in it at that point is necessarily left over from a PRIOR run, since
+ * this run hasn't written any new ones yet.
+ */
+export async function clearAllMoHighlights(docId, accessToken, doc) {
+  const auth = authorizedClient(accessToken);
+  const docs = google.docs({ version: "v1", auth });
+
+  const requests = [];
+
+  for (const range of findHighlightedRanges(doc.body?.content)) {
+    requests.push({
+      updateTextStyle: {
+        range: { startIndex: range.startIndex, endIndex: range.endIndex },
+        textStyle: { backgroundColor: {} },
+        fields: "backgroundColor",
+      },
+    });
+  }
+
+  for (const [segmentId, header] of Object.entries(doc.headers || {})) {
+    for (const range of findHighlightedRanges(header.content)) {
+      requests.push({
+        updateTextStyle: {
+          range: { startIndex: range.startIndex, endIndex: range.endIndex, segmentId },
+          textStyle: { backgroundColor: {} },
+          fields: "backgroundColor",
+        },
+      });
+    }
+  }
+
+  for (const [segmentId, footer] of Object.entries(doc.footers || {})) {
+    for (const range of findHighlightedRanges(footer.content)) {
+      requests.push({
+        updateTextStyle: {
+          range: { startIndex: range.startIndex, endIndex: range.endIndex, segmentId },
+          textStyle: { backgroundColor: {} },
+          fields: "backgroundColor",
+        },
+      });
+    }
+  }
+
+  if (requests.length === 0) return { cleared: 0 };
+
+  await docs.documents.batchUpdate({
+    documentId: docId,
+    requestBody: { requests },
+  });
+
+  return { cleared: requests.length };
+}
+
+/**
  * Adds a native comment anchored to a text range. Comments live in the
  * Drive API, not the Docs API — this uses anchored replies via the
  * "anchor" field referencing the doc's revision + range.

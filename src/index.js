@@ -7,6 +7,7 @@ import {
   addComment,
   addGeneralComment,
   cleanupPreviousMoComments,
+  clearAllMoHighlights,
 } from "./googleDocs.js";
 import { fetchPdfDocument, getDriveFileMimeType } from "./pdf.js";
 import { runAllChecks } from "./rules/index.js";
@@ -90,7 +91,16 @@ app.post("/check", async (req, res) => {
       console.error("cleanupPreviousMoComments failed:", err.message);
     }
 
-    const { runs, images, fullText, footers, headers, pageSize, headerText } = await fetchDocument(docId, accessToken);
+    const { doc, runs, images, fullText, footers, headers, pageSize, headerText } = await fetchDocument(docId, accessToken);
+
+    try {
+      await clearAllMoHighlights(docId, accessToken, doc);
+    } catch (err) {
+      // Non-fatal, same reasoning as the comment cleanup above — a
+      // transient failure here shouldn't block the check itself.
+      console.error("clearAllMoHighlights failed:", err.message);
+    }
+
     const { issues, leadTime } = await runAllChecks(fullText, moaType, {
       runs,
       images,
