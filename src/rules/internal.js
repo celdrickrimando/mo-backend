@@ -1,12 +1,14 @@
 // Internal MOA checks — Mo_Rule_Checklist_Spec.md section 1
 
-import { checkTopRightCode } from "./shared.js";
-
-export function checkInternal(fullText, { gtcCanonicalOverride, headerText, pdfMode } = {}) {
+export function checkInternal(fullText, { pdfMode } = {}) {
   const issues = [];
 
-  // Top-right tracking code (D-A-1a) correctness for Internal.
-  issues.push(...checkTopRightCode(fullText, "internal", gtcCanonicalOverride, headerText, undefined, pdfMode));
+  // NOTE: Internal MOAs do NOT use the top-right "D-A-1a" tracking code at
+  // all — confirmed against the actual Internal MOA template (no header
+  // reference to it anywhere, unlike Sponsorship). Unlike Partnership,
+  // there's no "flag if present" check here either, since that wasn't
+  // reported as an issue — only add one if D-A-1a actually starts turning
+  // up in real Internal MOAs.
 
   // President representation check
   if (!/represented by its President/i.test(fullText)) {

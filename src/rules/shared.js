@@ -63,8 +63,16 @@ export function checkRequiredSections(fullText) {
   return issues;
 }
 
-export function checkPayeeClause(fullText, runs) {
+export function checkPayeeClause(fullText, runs, moaType) {
   const issues = [];
+  // Internal MOAs are between two DLSU offices/orgs — there's no external
+  // payee, and the actual template legitimately uses plain
+  // "DE LA SALLE UNIVERSITY" (no "INC.") throughout; "INC." never appears
+  // anywhere in a real Internal MOA. This check only makes sense for
+  // Sponsorship/Partnership, where DLSU IS the payee receiving funds and
+  // needs the complete legal entity name for the official receipt.
+  if (moaType === "internal") return issues;
+
   if (fullText.includes("DE LA SALLE UNIVERSITY") && !fullText.includes("DE LA SALLE UNIVERSITY INC.")) {
     issues.push({
       type: "incomplete_payee_name",
@@ -296,7 +304,7 @@ const GTC_SIMILARITY_THRESHOLD = 0.95; // below this = "substantively edited"
 
 export function checkTopRightCode(fullText, moaType, canonicalOverride, headerText, codedSelection, pdfMode) {
   const issues = [];
-  if (moaType !== "sponsorship" && moaType !== "internal") return issues; // Partnership handled separately (absence-only)
+  if (moaType !== "sponsorship") return issues; // Internal never uses D-A-1a; Partnership handled separately (absence-only)
   if (pdfMode) return issues; // no reliable header/body separation in flattened PDF text — skip rather than misfire
 
   // The top-right tracking code lives in the document HEADER, not the
@@ -595,7 +603,7 @@ export function runSharedChecks(fullText, { runs, images, footers, pageSize, moa
   return [
     ...checkPlaceholders(fullText),
     ...checkRequiredSections(fullText),
-    ...checkPayeeClause(fullText, runs), // bold check inside already no-ops without runs
+    ...checkPayeeClause(fullText, runs, moaType),
     ...(pdfMode ? [] : checkFooter(footers, moaType, footerCanonicalOverride)),
     ...(pdfMode ? [] : checkOnePageSignatoryBlock(fullText, pageSize)),
     ...checkNameHonorifics(fullText, moaType),
