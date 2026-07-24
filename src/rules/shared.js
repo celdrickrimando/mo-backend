@@ -299,6 +299,68 @@ export function checkFooterMatchesTitle(fullText, footers) {
 }
 
 /**
+ * Confirms the document's own "(re: ...)" subtitle actually matches the
+ * MOA type the reviewer selected in the popup before running the check
+ * (e.g. selecting "Partnership" but the subtitle reads "(re: External
+ * Sponsorship for ...)"). This is a real, seen-in-practice mistake —
+ * either the wrong type was selected in the popup, or the subtitle text
+ * itself was copy-pasted from the wrong template and never updated — and
+ * previously went completely undetected, since nothing compared the
+ * subtitle against the selected moaType at all.
+ *
+ * Per moa.md's own footer wording convention (see checkFooter above),
+ * canonical subtitles read:
+ *   - Internal:     "Internal Partnership for [DLSU Event Name]"
+ *   - Sponsorship:  "External Sponsorship for [Event Name]"
+ *   - Partnership:  "External Partnership for [Event Name]"
+ * Internal's canonical wording legitimately contains the word
+ * "Partnership" too, so a plain "does it contain the word X" test isn't
+ * enough to tell Internal and Partnership apart — detectSubtitleMoaType()
+ * below checks for "internal" FIRST, before falling through to
+ * "sponsorship"/"partnership", so "Internal Partnership" is correctly
+ * read as Internal, not Partnership.
+ *
+ * Deliberately conservative: if the subtitle doesn't clearly contain any
+ * of the three type keywords at all, this stays silent rather than
+ * guessing — avoiding false positives on a subtitle that was reworded in
+ * a way this can't recognize.
+ */
+const MOA_TYPE_LABELS = {
+  internal: "Internal",
+  sponsorship: "Sponsorship",
+  partnership: "Partnership",
+};
+
+function detectSubtitleMoaType(subtitle) {
+  if (/\binternal\b/i.test(subtitle)) return "internal";
+  if (/\bsponsorship\b/i.test(subtitle)) return "sponsorship";
+  if (/\bpartnership\b/i.test(subtitle)) return "partnership";
+  return null; // no recognizable type keyword — stay silent, don't guess
+}
+
+export function checkSubtitleMatchesSelectedType(fullText, moaType) {
+  const issues = [];
+  const titleMatch = fullText.match(/\(re:\s*([^)]+)\)/i);
+  if (!titleMatch) return issues; // no subtitle to compare against
+
+  const subtitle = titleMatch[1].trim();
+  const detectedType = detectSubtitleMoaType(subtitle);
+  if (!detectedType || detectedType === moaType) return issues;
+
+  issues.push({
+    type: "subtitle_type_mismatch",
+    text: titleMatch[0],
+    message: `The document's subtitle reads "(re: ${subtitle})", which reads as ${articleFor(MOA_TYPE_LABELS[detectedType])} ${MOA_TYPE_LABELS[detectedType]} MOA, but this document was checked as ${MOA_TYPE_LABELS[moaType]}. Please confirm the correct document type — either re-run the check as ${MOA_TYPE_LABELS[detectedType]}, or fix the subtitle wording if ${MOA_TYPE_LABELS[moaType]} is actually correct.`,
+  });
+
+  return issues;
+}
+
+function articleFor(label) {
+  return /^[aeiou]/i.test(label) ? "an" : "a";
+}
+
+/**
  * Top-right tracking code (D-A-1a) correctness for Sponsorship/Internal.
  * moa.md: if the GTC-through-Dispute-Resolution section differs from the
  * canonical template text, the code must change from "D-A-1a"; otherwise
@@ -322,6 +384,7 @@ const GTC_SECTION_END = "DISPUTE RESOLUTION AND VENUE OF ACTIONS";
 function normalizeForDiff(str) {
   return str.replace(/\s+/g, " ").trim().toLowerCase();
 }
+
 
 function extractGtcSection(fullText) {
   const start = fullText.indexOf(GTC_SECTION_START);
@@ -732,6 +795,7 @@ export function runSharedChecks(fullText, { runs, images, pageBreaks, footers, p
     ...checkPlaceholders(fullText, moaType),
     ...checkRequiredSections(fullText),
     ...checkPayeeClause(fullText, runs, moaType),
+    ...checkSubtitleMatchesSelectedType(fullText, moaType),
     ...(pdfMode ? [] : checkFooter(footers, moaType, footerCanonicalOverride)),
     ...(pdfMode ? [] : checkFooterMatchesTitle(fullText, footers)),
     ...(pdfMode ? [] : checkOnePageSignatoryBlock(fullText, pageSize)),
