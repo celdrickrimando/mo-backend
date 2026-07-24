@@ -21,6 +21,17 @@ const PLACEHOLDER_STRINGS = [
   "FULL ORGANIZATION NAME",
 ];
 
+// Internal-only placeholders — confirmed against the actual Internal MOA
+// template; these strings don't appear in Sponsorship/Partnership at all,
+// so they're kept separate rather than added to the shared list above.
+const INTERNAL_PLACEHOLDER_STRINGS = [
+  "SHORT ORGANIZATION NAME",
+  "DLSU-OFFICE-SHORT ORGANIZATION NAME",
+  "DLSU-SLIFE-SHORT ORGANIZATION NAME",
+  "NAME OF PROJECT HEAD/ORG REP",
+  "NAME OF FACULTY ADVISER",
+];
+
 const REQUIRED_SECTIONS = [
   "GENERAL TERMS AND CONDITIONS",
   "TERMINATION OF THE MEMORANDUM OF AGREEMENT",
@@ -35,9 +46,10 @@ const REQUIRED_SECTIONS = [
 // silently missed every real document and made lead time unparseable.
 const VALID_DATE_RE = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/i;
 
-export function checkPlaceholders(fullText) {
+export function checkPlaceholders(fullText, moaType) {
   const issues = [];
-  for (const placeholder of PLACEHOLDER_STRINGS) {
+  const list = moaType === "internal" ? [...PLACEHOLDER_STRINGS, ...INTERNAL_PLACEHOLDER_STRINGS] : PLACEHOLDER_STRINGS;
+  for (const placeholder of list) {
     if (fullText.includes(placeholder)) {
       issues.push({
         type: "unfilled_placeholder",
@@ -245,6 +257,40 @@ export function checkFooter(footers, moaType, canonicalOverride) {
         text,
         message:
           "The page number in the footer is bold — it should not be. Only the \"Memorandum of Agreement...\" text should be bold.",
+      });
+    }
+  }
+
+  return issues;
+}
+
+/**
+ * Confirms the footer's "Memorandum of Agreement re: ..." wording matches
+ * the document's own "(re: ...)" subtitle under the main title. Unlike
+ * checkFooter's canonical-text consistency check (which needs a
+ * configured canonical string per MOA type), this compares the doc
+ * against ITSELF, so it works out of the box with no sheet config.
+ */
+export function checkFooterMatchesTitle(fullText, footers) {
+  const issues = [];
+  if (!footers || footers.length === 0) return issues; // missing_footer already covers this
+
+  const titleMatch = fullText.match(/\(re:\s*([^)]+)\)/i);
+  if (!titleMatch) return issues; // no subtitle to compare against
+
+  const titleText = normalizeForDiff(titleMatch[1]);
+
+  for (const footer of footers) {
+    const footerMatch = footer.fullText.match(/Memorandum of Agreement re:\s*(.+?)(?:Page\s+\S|$)/i);
+    if (!footerMatch) continue;
+    const footerText = normalizeForDiff(footerMatch[1]);
+    if (!footerText) continue;
+
+    if (footerText !== titleText) {
+      issues.push({
+        type: "footer_title_mismatch",
+        text: footerMatch[0].trim(),
+        message: `Footer title ("${footerMatch[1].trim()}") doesn't match the document's own title ("${titleMatch[1].trim()}"). These must be consistent.`,
       });
     }
   }
@@ -601,10 +647,11 @@ export function checkNameHonorifics(fullText, moaType) {
 
 export function runSharedChecks(fullText, { runs, images, footers, pageSize, moaType, footerCanonicalOverride, pdfMode } = {}) {
   return [
-    ...checkPlaceholders(fullText),
+    ...checkPlaceholders(fullText, moaType),
     ...checkRequiredSections(fullText),
     ...checkPayeeClause(fullText, runs, moaType),
     ...(pdfMode ? [] : checkFooter(footers, moaType, footerCanonicalOverride)),
+    ...(pdfMode ? [] : checkFooterMatchesTitle(fullText, footers)),
     ...(pdfMode ? [] : checkOnePageSignatoryBlock(fullText, pageSize)),
     ...checkNameHonorifics(fullText, moaType),
     ...(pdfMode ? [] : checkNoSignaturesInDraft(fullText, runs, images)),
