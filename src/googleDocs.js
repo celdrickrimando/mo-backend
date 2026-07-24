@@ -182,7 +182,7 @@ export function isTextBold(runs, needle) {
  * fields; for multi-run matches spanning formatting boundaries, a more
  * robust sliding-window match across concatenated run text is needed.
  */
-export function findRangeForText(runs, needle) {
+export function findRangeForText(runs, needle, segmentId) {
   // First pass: try within a single run (fast path, exact match).
   for (const run of runs) {
     const idx = run.text.indexOf(needle);
@@ -190,6 +190,7 @@ export function findRangeForText(runs, needle) {
       return {
         startIndex: run.startIndex + idx,
         endIndex: run.startIndex + idx + needle.length,
+        ...(segmentId ? { segmentId } : {}),
       };
     }
   }
@@ -212,7 +213,42 @@ export function findRangeForText(runs, needle) {
     return {
       startIndex: posMap[idx],
       endIndex: posMap[idx + needle.length - 1] + 1,
+      ...(segmentId ? { segmentId } : {}),
     };
+  }
+
+  return null;
+}
+
+/**
+ * Locates `needle` across the document's body, footers, AND headers (in
+ * that order), returning both the range (tagged with a `segmentId` when
+ * the match is inside a footer/header, since those are separate index
+ * spaces from the body per the Docs API) and which segment it came from.
+ * Returns null if the text can't be found anywhere.
+ *
+ * This exists because footer- and header-only text (the "Memorandum of
+ * Agreement..." line, "D-A-1a", etc.) previously could never be located
+ * via findRangeForText(bodyRuns, needle) alone — those runs simply aren't
+ * in the body's run list at all. Issues referencing that text used to
+ * fall through to a generic, unanchored "general notes" comment glued to
+ * the very first character of the document body, which is both
+ * meaningless to a reviewer and prone to Google Docs showing "Original
+ * content deleted" once that phantom anchor drifts from the current
+ * content on any subsequent edit.
+ */
+export function findRangeAnywhere(needle, { runs, footers = [], headers = [] }) {
+  const bodyRange = findRangeForText(runs, needle);
+  if (bodyRange) return { ...bodyRange, segment: "body" };
+
+  for (const footer of footers) {
+    const range = findRangeForText(footer.runs, needle, footer.footerId);
+    if (range) return { ...range, segment: "footer" };
+  }
+
+  for (const header of headers) {
+    const range = findRangeForText(header.runs, needle, header.headerId);
+    if (range) return { ...range, segment: "header" };
   }
 
   return null;
@@ -231,7 +267,14 @@ export async function highlightRange(docId, accessToken, range, color = { red: 1
       requests: [
         {
           updateTextStyle: {
-            range: { startIndex: range.startIndex, endIndex: range.endIndex },
+            range: {
+              startIndex: range.startIndex,
+              endIndex: range.endIndex,
+              // segmentId targets a specific header/footer/footnote's own
+              // index space; omitted (undefined) means "the doc body",
+              // per the Docs API's Range.segmentId field.
+              ...(range.segmentId ? { segmentId: range.segmentId } : {}),
+            },
             textStyle: {
               backgroundColor: { color: { rgbColor: color } },
             },
@@ -266,6 +309,21 @@ export async function highlightRange(docId, accessToken, range, color = { red: 1
  * revision that's no longer current.
  */
 export async function addComment(docId, accessToken, range, message) {
+  if (range?.segmentId) {
+    // The Drive Comments "anchor" JSON's `txt: {o, l}` offsets are only
+    // valid within the document BODY's index space. A footer/header
+    // range's startIndex/endIndex are local to that footer/header
+    // instead, so reusing this same anchor format would point at an
+    // unrelated (or out-of-bounds) spot in the body — silently creating
+    // a broken/misplaced comment rather than throwing. Callers should
+    // use highlightRange() (which does support segmentId) for the visual
+    // marker, and addGeneralComment() for the note itself, when the
+    // match is inside a footer or header.
+    throw new Error(
+      "addComment() can't anchor into a footer/header segment — use addGeneralComment() for footer/header matches instead."
+    );
+  }
+
   const auth = authorizedClient(accessToken);
   const docs = google.docs({ version: "v1", auth });
   const drive = google.drive({ version: "v3", auth });
@@ -294,6 +352,36 @@ export async function addComment(docId, accessToken, range, message) {
     requestBody: {
       content: message,
       anchor,
+    },
+  });
+}
+
+/**
+ * Adds a plain, UNANCHORED comment — one that isn't tied to any text
+ * range at all. Used for issues whose flagged text lives in a footer or
+ * header (where body-relative anchoring doesn't apply) or that reference
+ * no locatable text in the document at all (e.g. something missing
+ * entirely).
+ *
+ * This intentionally does NOT fake an anchor (e.g. pointing at the first
+ * character of the body) the way an earlier version of this codebase
+ * did — that produced a meaningless 1-character "highlight" plus a
+ * comment whose quoted content didn't match what the comment was
+ * actually about, which Google Docs would often render as "Original
+ * content deleted" once the doc changed at all after the anchor was
+ * created. A plain comment with no anchor has nothing to go stale, and
+ * the message itself quotes the specific flagged text so it's still
+ * clear what the comment refers to.
+ */
+export async function addGeneralComment(docId, accessToken, message) {
+  const auth = authorizedClient(accessToken);
+  const drive = google.drive({ version: "v3", auth });
+
+  await drive.comments.create({
+    fileId: docId,
+    fields: "id",
+    requestBody: {
+      content: message,
     },
   });
 }

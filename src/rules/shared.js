@@ -97,13 +97,58 @@ const CANONICAL_FOOTER_TEXT = {
 // against a real one-line footer if it starts mis-flagging.
 const FOOTER_SINGLE_LINE_CHAR_THRESHOLD = 110;
 
-// The footer's 2nd line ("Page x of x") is its own templated field with a
-// different format than the "Memorandum of Agreement..." line — per
-// moa.md, ONLY the "Memorandum of Agreement..." line is the one that must
-// be shrunk down to fit a single line. "Page x of x" is a separate
-// paragraph by template design and must never be counted toward, or
-// flagged by, the one-line check.
-const PAGE_NUMBER_LINE_RE = /^page\s+\d+\s+of\s+\d+$/i;
+/**
+ * Splits a footer's flat run list back into paragraphs, since footer.runs
+ * (from extractRuns) is just a linear sequence — a paragraph boundary is
+ * wherever a "\n" shows up inside a run's text. Each paragraph also
+ * records whether ANY of its runs is a PAGE_NUMBER autoText field.
+ *
+ * This replaces a previous approach that tried to detect the "Page x of
+ * x" line by regex-matching literal digits in the extracted text. That
+ * regex could never match: Google Docs renders PAGE_NUMBER/PAGE_COUNT
+ * fields dynamically, so extractRuns() gets back an EMPTY string for the
+ * actual numbers — only the literal words "Page" and "of" have real
+ * text. A digit-matching regex therefore never recognized that line at
+ * all, which meant:
+ *   (a) the one-line check counted "Page x of x" as a 2nd real paragraph
+ *       of the "Memorandum of Agreement..." line and always flagged it, and
+ *   (b) the bold check swept the literal (non-bold-by-design) "Page"/"of"
+ *       words into the same bucket as the Memorandum line's runs and
+ *       always flagged it as having "lost" its bold formatting.
+ * Grouping by the actual paragraph (via the "\n" boundary) and judging a
+ * whole paragraph as page-number-only if it contains any PAGE_NUMBER
+ * field — rather than per-run text content — fixes both.
+ */
+function splitFooterParagraphs(runs) {
+  const paragraphs = [];
+  let current = { text: "", runs: [], hasPageNumberField: false };
+
+  for (const run of runs) {
+    const segments = run.text.split("\n");
+    segments.forEach((segment, i) => {
+      if (segment) current.text += segment;
+      if (run.isPageNumber) current.hasPageNumberField = true;
+      // Only attribute this run to the paragraph it actually contributes
+      // to. A run's text can end in "\n" (e.g. the Memorandum line's own
+      // run carries its own paragraph-ending newline) — splitting that
+      // produces a trailing empty segment representing "nothing more
+      // from this run" in the NEXT paragraph. Pushing the run there too
+      // would leak it (and its bold state) into a paragraph it isn't
+      // actually part of. Only the first segment (i === 0) or a
+      // non-empty segment counts as real membership.
+      if (segment || i === 0) current.runs.push(run);
+      if (i < segments.length - 1) {
+        paragraphs.push(current);
+        current = { text: "", runs: [], hasPageNumberField: false };
+      }
+    });
+  }
+  if (current.text.trim() || current.runs.length) paragraphs.push(current);
+
+  return paragraphs
+    .map((p) => ({ ...p, text: p.text.trim() }))
+    .filter((p) => p.text || p.hasPageNumberField);
+}
 
 export function checkFooter(footers, moaType, canonicalOverride) {
   const issues = [];
@@ -120,19 +165,23 @@ export function checkFooter(footers, moaType, canonicalOverride) {
     const text = footer.fullText.trim();
     if (!text) continue;
 
-    // Only the "Memorandum of Agreement..." line is subject to the
-    // one-line rule — split out (and ignore) the "Page x of x" line
-    // before counting paragraphs / measuring length.
-    const nonPageLines = footer.fullText
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean)
-      .filter((l) => !PAGE_NUMBER_LINE_RE.test(l));
-    const moaLineText = nonPageLines.join(" ");
+    const paragraphs = splitFooterParagraphs(footer.runs);
+    // "Page x of x" is its own templated field with a different format
+    // than the "Memorandum of Agreement..." line — per moa.md, ONLY the
+    // "Memorandum of Agreement..." line is subject to the one-line rule.
+    // A paragraph counts as the page-number line if it contains the
+    // PAGE_NUMBER/PAGE_COUNT autoText field, regardless of the literal
+    // "Page"/"of" text around it.
+    const moaParagraphs = paragraphs.filter((p) => !p.hasPageNumberField);
+    const pageParagraphs = paragraphs.filter((p) => p.hasPageNumberField);
+    const moaLineText = moaParagraphs
+      .map((p) => p.text)
+      .join(" ")
+      .trim();
 
     // (1) One line only — proxy via paragraph count and char length, since
     // Docs API doesn't expose actual rendered line-wrap state.
-    if (nonPageLines.length > 1 || moaLineText.length > FOOTER_SINGLE_LINE_CHAR_THRESHOLD) {
+    if (moaParagraphs.length > 1 || moaLineText.length > FOOTER_SINGLE_LINE_CHAR_THRESHOLD) {
       issues.push({
         type: "footer_not_one_line",
         text: moaLineText || text,
@@ -158,27 +207,27 @@ export function checkFooter(footers, moaType, canonicalOverride) {
       });
     }
 
-    // (3) Bold retained — the footer has two distinct pieces that must be
-    // judged separately: the "Memorandum of Agreement..." line (must be
-    // bold throughout) and the page-number field (must NOT be bold).
-    // Lumping both into one uniform check used to flag a correctly-built
-    // footer as broken, since the page number is legitimately non-bold.
-    const textRuns = footer.runs.filter((r) => r.text.trim() && !r.isPageNumber);
-    const pageNumberRuns = footer.runs.filter((r) => r.isPageNumber);
+    // (3) Bold retained — judged per ACTUAL PARAGRAPH (see
+    // splitFooterParagraphs above), not just the isPageNumber flag on
+    // individual runs, which only marks the number fields themselves and
+    // would otherwise sweep the literal (correctly non-bold) "Page"/"of"
+    // words in that same line into the Memorandum line's bold check.
+    const moaRuns = moaParagraphs.flatMap((p) => p.runs).filter((r) => r.text.trim());
+    const pageRuns = pageParagraphs.flatMap((p) => p.runs);
 
-    if (textRuns.length > 0) {
-      const boldStates = new Set(textRuns.map((r) => r.bold));
+    if (moaRuns.length > 0) {
+      const boldStates = new Set(moaRuns.map((r) => r.bold));
       if (boldStates.size > 1 || boldStates.has(false)) {
         issues.push({
           type: "footer_bold_not_retained",
-          text,
+          text: moaLineText || text,
           message:
             'Part or all of the footer\'s "Memorandum of Agreement..." text has lost its bold formatting. That line may be resized but must stay bold.',
         });
       }
     }
 
-    if (pageNumberRuns.some((r) => r.bold)) {
+    if (pageRuns.some((r) => r.bold)) {
       issues.push({
         type: "footer_page_number_bold",
         text,

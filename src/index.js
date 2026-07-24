@@ -1,6 +1,6 @@
 import express from "express";
 import cors from "cors";
-import { fetchDocument, findRangeForText, highlightRange, addComment } from "./googleDocs.js";
+import { fetchDocument, findRangeAnywhere, highlightRange, addComment, addGeneralComment } from "./googleDocs.js";
 import { runAllChecks } from "./rules/index.js";
 import { clearRulesCache } from "./rulesSheet.js";
 
@@ -27,7 +27,7 @@ app.post("/check", async (req, res) => {
   const effectiveCodedSelection = moaType === "sponsorship" ? codedSelection : undefined;
 
   try {
-    const { runs, fullText, footers, pageSize, headerText } = await fetchDocument(docId, accessToken);
+    const { runs, fullText, footers, headers, pageSize, headerText } = await fetchDocument(docId, accessToken);
     const { issues, leadTime } = await runAllChecks(fullText, moaType, {
       runs,
       footers,
@@ -36,28 +36,86 @@ app.post("/check", async (req, res) => {
       codedSelection: effectiveCodedSelection,
     });
 
-    // Write highlights + comments back into the doc for each issue we can locate.
-    // Some issues (a missing required phrase, footer text — which lives in
-    // a separate index space from the body) have no locatable range at
-    // all. Rather than silently dropping those from the doc, fall back to
-    // a general comment anchored at the top of the document, so nothing a
-    // reviewer needs to see gets lost — only the precise highlight is
-    // missing, not the note itself.
+    // Write highlights + comments back into the doc for each issue,
+    // individually — never merged into one combined comment, so a
+    // reviewer can tell at a glance which exact phrase each note is
+    // about.
+    //
+    // Three cases per issue, in order of preference:
+    //  1. Text found in the body -> highlight + a real anchored comment
+    //     on that exact range (as before).
+    //  2. Text found in a footer/header -> those are a separate index
+    //     space from the body (Docs API's segmentId), so we highlight
+    //     the exact phrase there directly (highlightRange supports
+    //     segmentId), but the comment itself is added as a plain,
+    //     unanchored note that quotes the flagged text — anchoring a
+    //     Drive comment into a footer/header segment isn't supported by
+    //     the same body-relative anchor format, so this keeps the note
+    //     accurate rather than silently mis-anchoring it.
+    //  3. Text not found anywhere (e.g. something required is missing
+    //     entirely) -> a plain, unanchored, INDIVIDUAL comment per issue,
+    //     still quoting whatever identifying text is available.
+    // Previously, every case-2/3 issue was dumped together into one
+    // single comment fake-anchored to the first character of the
+    // document body — which read as one wall of unrelated notes, and
+    // which Google Docs would often render as "Original content deleted"
+    // once the doc changed at all after that anchor was created.
     const writeResults = [];
     let markedCount = 0;
     let unmarkedCount = 0;
-    const generalNotes = [];
 
     for (const issue of issues) {
-      const range = findRangeForText(runs, issue.text);
-      if (!range) {
-        generalNotes.push(issue);
+      const match = issue.text ? findRangeAnywhere(issue.text, { runs, footers, headers }) : null;
+
+      if (match && match.segment === "body") {
+        try {
+          await highlightRange(docId, accessToken, match);
+          await addComment(docId, accessToken, match, issue.message);
+          writeResults.push({ issue: issue.type, message: issue.message, written: true });
+          markedCount++;
+        } catch (err) {
+          writeResults.push({ issue: issue.type, message: issue.message, written: false, reason: err.message });
+          unmarkedCount++;
+        }
         continue;
       }
+
+      if (match && (match.segment === "footer" || match.segment === "header")) {
+        try {
+          await highlightRange(docId, accessToken, match);
+          await addGeneralComment(
+            docId,
+            accessToken,
+            `Regarding the ${match.segment} text "${issue.text}":\n\n${issue.message}`
+          );
+          writeResults.push({
+            issue: issue.type,
+            message: issue.message,
+            written: true,
+            reason: `highlighted in the ${match.segment}; comment quotes the exact text (Drive comments can't anchor into a ${match.segment} the way they can in the body)`,
+          });
+          markedCount++;
+        } catch (err) {
+          writeResults.push({ issue: issue.type, message: issue.message, written: false, reason: err.message });
+          unmarkedCount++;
+        }
+        continue;
+      }
+
+      // Not locatable anywhere — still its own individual comment, not
+      // merged with any other issue, quoting the identifying text when
+      // there is any.
       try {
-        await highlightRange(docId, accessToken, range);
-        await addComment(docId, accessToken, range, issue.message);
-        writeResults.push({ issue: issue.type, message: issue.message, written: true });
+        const note = issue.text
+          ? `Regarding "${issue.text}":\n\n${issue.message}`
+          : issue.message;
+        await addGeneralComment(docId, accessToken, note);
+        writeResults.push({
+          issue: issue.type,
+          message: issue.message,
+          written: true,
+          reason: "general comment — couldn't pinpoint an exact location in the document",
+        });
         markedCount++;
       } catch (err) {
         writeResults.push({ issue: issue.type, message: issue.message, written: false, reason: err.message });
@@ -65,47 +123,12 @@ app.post("/check", async (req, res) => {
       }
     }
 
-    if (generalNotes.length > 0 && runs[0]) {
-      const combinedMessage =
-        "Mo found the following issue(s) that couldn't be pinpointed to exact text in the document (e.g. something missing, or footer text):\n\n" +
-        generalNotes.map((n, i) => `${i + 1}. ${n.message}`).join("\n\n");
-      try {
-        await addComment(
-          docId,
-          accessToken,
-          { startIndex: runs[0].startIndex, endIndex: runs[0].startIndex + 1 },
-          combinedMessage
-        );
-        for (const n of generalNotes) {
-          writeResults.push({ issue: n.type, message: n.message, written: true, reason: "general comment at top of doc — couldn't pinpoint exact text" });
-          markedCount++;
-        }
-      } catch (err) {
-        for (const n of generalNotes) {
-          writeResults.push({ issue: n.type, message: n.message, written: false, reason: `couldn't locate text, and general comment failed: ${err.message}` });
-          unmarkedCount++;
-        }
-      }
-    } else {
-      for (const n of generalNotes) {
-        writeResults.push({ issue: n.type, message: n.message, written: false, reason: "text not found in doc" });
-        unmarkedCount++;
-      }
-    }
-
     if (issues.length === 0) {
-      // Drop a single confirmation comment at the top of the doc.
-      if (runs[0]) {
-        try {
-          await addComment(
-            docId,
-            accessToken,
-            { startIndex: runs[0].startIndex, endIndex: runs[0].startIndex + 1 },
-            `Mo says a-ok. No issues found in this MOA. ${AFTERWORD}`
-          );
-        } catch {
-          // non-fatal — extension still reports a-ok even if the comment write fails
-        }
+      // Drop a single confirmation comment, unanchored (nothing to point at).
+      try {
+        await addGeneralComment(docId, accessToken, `Mo says a-ok. No issues found in this MOA. ${AFTERWORD}`);
+      } catch {
+        // non-fatal — extension still reports a-ok even if the comment write fails
       }
     }
 
