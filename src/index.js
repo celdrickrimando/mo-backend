@@ -8,6 +8,9 @@ import {
   addGeneralComment,
   cleanupPreviousMoComments,
   clearAllMoHighlights,
+  getDismissedIssueTypes,
+  dismissIssueType,
+  resetDismissedIssues,
 } from "./googleDocs.js";
 import { fetchPdfDocument, getDriveFileMimeType } from "./pdf.js";
 import { runAllChecks } from "./rules/index.js";
@@ -91,7 +94,7 @@ app.post("/check", async (req, res) => {
       console.error("cleanupPreviousMoComments failed:", err.message);
     }
 
-    const { doc, runs, images, fullText, footers, headers, pageSize, headerText } = await fetchDocument(docId, accessToken);
+    const { doc, runs, images, pageBreaks, fullText, footers, headers, pageSize, headerText } = await fetchDocument(docId, accessToken);
 
     try {
       await clearAllMoHighlights(docId, accessToken, doc);
@@ -101,14 +104,25 @@ app.post("/check", async (req, res) => {
       console.error("clearAllMoHighlights failed:", err.message);
     }
 
-    const { issues, leadTime } = await runAllChecks(fullText, moaType, {
+    const { issues: allIssues, leadTime } = await runAllChecks(fullText, moaType, {
       runs,
       images,
+      pageBreaks,
       footers,
       pageSize,
       headerText,
       codedSelection: effectiveCodedSelection,
     });
+
+    let dismissedTypes = [];
+    try {
+      dismissedTypes = await getDismissedIssueTypes(docId, accessToken);
+    } catch (err) {
+      // Non-fatal — worst case, a manually-resolved issue reappears once
+      // more instead of the check itself failing.
+      console.error("getDismissedIssueTypes failed:", err.message);
+    }
+    const issues = dismissedTypes.length ? allIssues.filter((issue) => !dismissedTypes.includes(issue.type)) : allIssues;
 
     // Write highlights + comments back into the doc for each issue,
     // individually — never merged into one combined comment, so a
@@ -225,6 +239,40 @@ app.post("/check", async (req, res) => {
 });
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Lets the popup permanently mute a "please check manually" issue for one
+// specific document once a reviewer has confirmed it by eye, so it stops
+// being re-raised (and re-commented/highlighted) on every future check of
+// that same doc. Only issue types in DISMISSIBLE_ISSUE_CODES (googleDocs.js)
+// are eligible — anything the rule engine treats as a hard pass/fail can't
+// be muted this way.
+app.post("/dismiss-issue", async (req, res) => {
+  const { docId, accessToken, issueType } = req.body;
+  if (!docId || !accessToken || !issueType) {
+    return res.status(400).json({ error: "docId, accessToken, and issueType are required." });
+  }
+  try {
+    const dismissed = await dismissIssueType(docId, accessToken, issueType);
+    res.json({ dismissed });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Un-mutes every previously dismissed issue for a document, so future
+// checks go back to raising all of them again.
+app.post("/reset-dismissed-issues", async (req, res) => {
+  const { docId, accessToken } = req.body;
+  if (!docId || !accessToken) {
+    return res.status(400).json({ error: "docId and accessToken are required." });
+  }
+  try {
+    await resetDismissedIssues(docId, accessToken);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 // Manually clear the rules-sheet cache so a just-edited sheet takes
 // effect immediately instead of waiting for the ~15 second TTL to expire.

@@ -39,7 +39,8 @@ function tagMoComment(message) {
  */
 function extractRuns(content) {
   const runs = [];
-  const images = []; // NEW: [{startIndex, endIndex, objectId}]
+  const images = []; // [{startIndex, endIndex, objectId}]
+  const pageBreaks = []; // [{startIndex, endIndex}] — explicit "Insert > Page break" markers
   for (const el of content || []) {
     if (!el.paragraph) continue;
     for (const pe of el.paragraph.elements || []) {
@@ -76,10 +77,19 @@ function extractRuns(content) {
           endIndex: pe.endIndex,
           objectId: pe.inlineObjectElement.inlineObjectId,
         });
+      } else if (pe.pageBreak) {
+        // An explicit manual page break (Insert > Break > Page break, or
+        // Ctrl+Enter) — Docs represents this as its own structural
+        // element occupying one index position, distinct from a
+        // paragraph's "page break before" style (which this does NOT
+        // capture, since that's a paragraphStyle flag, not an inline
+        // element — not needed here since the Internal template uses a
+        // manual break).
+        pageBreaks.push({ startIndex: pe.startIndex, endIndex: pe.endIndex });
       }
     }
   }
-  return { runs, images };
+  return { runs, images, pageBreaks };
 }
 
 /**
@@ -113,7 +123,7 @@ export async function fetchDocument(docId, accessToken) {
   }
   const doc = res.data;
 
-  const { runs, images } = extractRuns(doc.body?.content);
+  const { runs, images, pageBreaks } = extractRuns(doc.body?.content);
   const fullText = runs.map((r) => r.text).join("");
 
   // Footers: doc.footers is a map of footerId -> Footer object. Collect
@@ -175,7 +185,7 @@ export async function fetchDocument(docId, accessToken) {
     });
   const headerText = headers.map((h) => h.fullText).join("\n");
 
-  return { doc, runs, images, fullText, footers, headers, headerText, pageSize };
+  return { doc, runs, images, pageBreaks, fullText, footers, headers, headerText, pageSize };
 }
 
 /**
@@ -285,6 +295,83 @@ export function findRangeAnywhere(needle, { runs, footers = [], headers = [] }) 
   }
 
   return null;
+}
+
+/**
+ * Issue types a reviewer can permanently mute for one document, once
+ * they've manually confirmed them by eye — these are exactly the
+ * "couldn't verify automatically, please check manually" issue types
+ * across the rule engine, never a hard pass/fail one. Stored as short
+ * codes (not the full type string) in the file's own Drive appProperties
+ * value, which has a small per-value size limit — mapped back to the
+ * real issue type on read.
+ */
+const DISMISSIBLE_ISSUE_CODES = {
+  signatory_block_page_break_needs_manual_check: "pagebreak",
+  top_right_code_needs_manual_check: "topcode",
+  signatory_block_page_fit_unknown: "onepage",
+  gtc_section_not_found: "gtc",
+  event_date_format_unclear: "datefmt",
+};
+const ISSUE_TYPE_BY_CODE = Object.fromEntries(
+  Object.entries(DISMISSIBLE_ISSUE_CODES).map(([type, code]) => [code, type])
+);
+
+/**
+ * Reads which issue types have been permanently dismissed for this
+ * specific document (per-file, via Drive's private appProperties — never
+ * shared across documents).
+ */
+export async function getDismissedIssueTypes(docId, accessToken) {
+  const auth = authorizedClient(accessToken);
+  const drive = google.drive({ version: "v3", auth });
+  const { data } = await drive.files.get({ fileId: docId, fields: "appProperties" });
+  const raw = data.appProperties?.moDismissed;
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((code) => ISSUE_TYPE_BY_CODE[code])
+    .filter(Boolean);
+}
+
+/**
+ * Permanently mutes one issue type for this document — used when a
+ * reviewer has manually confirmed a "please check manually" issue is
+ * actually fine, so /check stops re-raising it on every future run.
+ * Only issue types in DISMISSIBLE_ISSUE_CODES can be dismissed this way;
+ * anything the rule engine treats as a hard pass/fail is never eligible.
+ */
+export async function dismissIssueType(docId, accessToken, issueType) {
+  const code = DISMISSIBLE_ISSUE_CODES[issueType];
+  if (!code) {
+    throw new Error(`"${issueType}" isn't a dismissible issue type.`);
+  }
+
+  const auth = authorizedClient(accessToken);
+  const drive = google.drive({ version: "v3", auth });
+  const { data } = await drive.files.get({ fileId: docId, fields: "appProperties" });
+  const existingCodes = new Set((data.appProperties?.moDismissed || "").split(",").filter(Boolean));
+  existingCodes.add(code);
+
+  await drive.files.update({
+    fileId: docId,
+    requestBody: { appProperties: { moDismissed: [...existingCodes].join(",") } },
+  });
+
+  return [...existingCodes].map((c) => ISSUE_TYPE_BY_CODE[c]).filter(Boolean);
+}
+
+/**
+ * Clears every dismissed issue type for this document, so future checks
+ * go back to raising all of them again.
+ */
+export async function resetDismissedIssues(docId, accessToken) {
+  const auth = authorizedClient(accessToken);
+  const drive = google.drive({ version: "v3", auth });
+  await drive.files.update({
+    fileId: docId,
+    requestBody: { appProperties: { moDismissed: "" } },
+  });
 }
 
 /**

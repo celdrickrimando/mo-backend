@@ -31,7 +31,7 @@ export async function runAllChecks(fullText, moaType, docContext = {}) {
     throw new Error(`Unknown MOA type: ${moaType}`);
   }
 
-  const { runs, images, footers, pageSize, headerText, codedSelection, pdfMode } = docContext;
+  const { runs, images, pageBreaks, footers, pageSize, headerText, codedSelection, pdfMode } = docContext;
   const rulesConfig = await getRulesConfig();
 
   const footerCanonicalOverride = getCanonicalTextFromSheet(rulesConfig, moaType, "Footer");
@@ -66,6 +66,10 @@ export async function runAllChecks(fullText, moaType, docContext = {}) {
       headerText: pdfMode ? undefined : headerText,
       codedSelection,
       pdfMode,
+      // runs/pageBreaks are undefined in PDF mode (no structural position
+      // data) — checkInternal's page-break check already guards on that.
+      runs,
+      pageBreaks,
     }),
     ...runAllSheetDrivenRules(fullText, moaType, rulesConfig),
   ];
