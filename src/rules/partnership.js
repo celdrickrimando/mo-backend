@@ -88,5 +88,13 @@ function detectUndertakingBranch(fullText) {
 
   if (hasNonMonetary && !hasMonetaryPurchase) return "non_monetary";
   if (hasMonetaryPurchase && !hasNonMonetary) return "monetary_purchase";
-  return "unclear";
+  if (hasNonMonetary && hasMonetaryPurchase) return "unclear"; // both present — genuinely ambiguous
+
+  // Neither canonical phrase is present verbatim. Real MOAs don't always
+  // keep that exact wording, so don't force a false "unclear" flag just
+  // because it was reworded or dropped — a document with no "PHP" amount
+  // anywhere is reliably non-monetary on its own. Only fall back to
+  // "unclear" if a PHP amount actually appears without matching either
+  // canonical phrase.
+  return /PHP\s?[\d,]+/.test(fullText) ? "unclear" : "non_monetary";
 }

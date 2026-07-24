@@ -30,7 +30,10 @@ const REQUIRED_SECTIONS = [
 ];
 
 // Matches "Month DD, YYYY" e.g. "October 20, 2024"
-const VALID_DATE_RE = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/;
+// /i because the template itself has these dates typed in ALL CAPS (e.g.
+// "JUNE 19, 2026") — a case-sensitive match against Title-Case month names
+// silently missed every real document and made lead time unparseable.
+const VALID_DATE_RE = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\b/i;
 
 export function checkPlaceholders(fullText) {
   const issues = [];
@@ -444,7 +447,7 @@ export function extractLeadTimeDates(fullText, moaType) {
   let signingDate = null;
   if (signingMatch) {
     const [, day, month, year] = signingMatch;
-    signingDate = safeDate(`${month} ${day}, ${year}`);
+    signingDate = safeDate(normalizeDateCasing(`${month} ${day}, ${year}`));
   }
 
   const anchor = moaType === "internal" ? "Witnesseth that:" : "UNDERTAKING";
@@ -455,11 +458,20 @@ export function extractLeadTimeDates(fullText, moaType) {
     const window = fullText.slice(anchorIdx, anchorIdx + 800);
     const dateMatch = window.match(VALID_DATE_RE);
     if (dateMatch) {
-      eventStartDate = safeDate(dateMatch[0]);
+      eventStartDate = safeDate(normalizeDateCasing(dateMatch[0]));
     }
   }
 
   return { signingDate, eventStartDate };
+}
+
+// Templates are frequently typed in ALL CAPS (e.g. "JUNE 19, 2026"). V8
+// happens to parse that fine via `new Date(...)`, but that's not a
+// guaranteed cross-engine behavior — normalize to "June 19, 2026" first
+// so date parsing doesn't silently depend on a JS engine implementation
+// detail.
+function normalizeDateCasing(str) {
+  return str.replace(/[A-Za-z]+/, (month) => month[0].toUpperCase() + month.slice(1).toLowerCase());
 }
 
 function safeDate(str) {
