@@ -315,15 +315,27 @@ export function checkFooterMatchesTitle(fullText, footers) {
  *   - Partnership:  "External Partnership for [Event Name]"
  * Internal's canonical wording legitimately contains the word
  * "Partnership" too, so a plain "does it contain the word X" test isn't
- * enough to tell Internal and Partnership apart — detectSubtitleMoaType()
+ * enough to tell Internal and Partnership apart — classifySubtitle()
  * below checks for "internal" FIRST, before falling through to
  * "sponsorship"/"partnership", so "Internal Partnership" is correctly
  * read as Internal, not Partnership.
  *
- * Deliberately conservative: if the subtitle doesn't clearly contain any
- * of the three type keywords at all, this stays silent rather than
- * guessing — avoiding false positives on a subtitle that was reworded in
- * a way this can't recognize.
+ * Two tiers of detection:
+ *  1. Specific — the subtitle names an exact type ("Internal",
+ *     "Sponsorship", or "Partnership"). Flagged against whichever exact
+ *     type was selected.
+ *  2. Broad fallback — the specific word isn't there, but "Internal" vs.
+ *     "External" still is (e.g. a reworded subtitle that dropped
+ *     "Sponsorship"/"Partnership" but kept "External"). "Internal" is
+ *     always its own type; "External" covers BOTH Sponsorship and
+ *     Partnership — those two are never flagged against each other at
+ *     this tier, only against Internal, since a plain "External" doesn't
+ *     say which of the two it is.
+ *
+ * Deliberately conservative: if the subtitle doesn't contain any of
+ * "internal"/"external"/"sponsorship"/"partnership" at all, this stays
+ * silent rather than guessing — avoiding false positives on a subtitle
+ * reworded in a way this can't recognize.
  */
 const MOA_TYPE_LABELS = {
   internal: "Internal",
@@ -331,10 +343,14 @@ const MOA_TYPE_LABELS = {
   partnership: "Partnership",
 };
 
-function detectSubtitleMoaType(subtitle) {
-  if (/\binternal\b/i.test(subtitle)) return "internal";
-  if (/\bsponsorship\b/i.test(subtitle)) return "sponsorship";
-  if (/\bpartnership\b/i.test(subtitle)) return "partnership";
+// Which selected moaType values count as "External" for the broad-tier check.
+const EXTERNAL_MOA_TYPES = new Set(["sponsorship", "partnership"]);
+
+function classifySubtitle(subtitle) {
+  if (/\binternal\b/i.test(subtitle)) return { type: "internal", specific: true };
+  if (/\bsponsorship\b/i.test(subtitle)) return { type: "sponsorship", specific: true };
+  if (/\bpartnership\b/i.test(subtitle)) return { type: "partnership", specific: true };
+  if (/\bexternal\b/i.test(subtitle)) return { type: "external", specific: false };
   return null; // no recognizable type keyword — stay silent, don't guess
 }
 
@@ -344,14 +360,31 @@ export function checkSubtitleMatchesSelectedType(fullText, moaType) {
   if (!titleMatch) return issues; // no subtitle to compare against
 
   const subtitle = titleMatch[1].trim();
-  const detectedType = detectSubtitleMoaType(subtitle);
-  if (!detectedType || detectedType === moaType) return issues;
+  const classification = classifySubtitle(subtitle);
+  if (!classification) return issues;
 
-  issues.push({
-    type: "subtitle_type_mismatch",
-    text: titleMatch[0],
-    message: `The document's subtitle reads "(re: ${subtitle})", which reads as ${articleFor(MOA_TYPE_LABELS[detectedType])} ${MOA_TYPE_LABELS[detectedType]} MOA, but this document was checked as ${MOA_TYPE_LABELS[moaType]}. Please confirm the correct document type — either re-run the check as ${MOA_TYPE_LABELS[detectedType]}, or fix the subtitle wording if ${MOA_TYPE_LABELS[moaType]} is actually correct.`,
-  });
+  if (classification.specific) {
+    if (classification.type === moaType) return issues;
+
+    issues.push({
+      type: "subtitle_type_mismatch",
+      text: titleMatch[0],
+      message: `The document's subtitle reads "(re: ${subtitle})", which reads as ${articleFor(MOA_TYPE_LABELS[classification.type])} ${MOA_TYPE_LABELS[classification.type]} MOA, but this document was checked as ${MOA_TYPE_LABELS[moaType]}. Please confirm the correct document type — either re-run the check as ${MOA_TYPE_LABELS[classification.type]}, or fix the subtitle wording if ${MOA_TYPE_LABELS[moaType]} is actually correct.`,
+    });
+    return issues;
+  }
+
+  // Broad fallback: only "external" reaches here (no specific word
+  // found). "External" is only inconsistent with an Internal selection —
+  // it's consistent with either Sponsorship or Partnership, so those two
+  // are never flagged against each other at this tier.
+  if (!EXTERNAL_MOA_TYPES.has(moaType)) {
+    issues.push({
+      type: "subtitle_type_mismatch",
+      text: titleMatch[0],
+      message: `The document's subtitle reads "(re: ${subtitle})", which reads as an External MOA (Sponsorship or Partnership), but this document was checked as Internal. Please confirm the correct document type — either re-run the check as Sponsorship or Partnership (whichever applies), or fix the subtitle wording if Internal is actually correct.`,
+    });
+  }
 
   return issues;
 }
