@@ -31,7 +31,7 @@ export async function runAllChecks(fullText, moaType, docContext = {}) {
     throw new Error(`Unknown MOA type: ${moaType}`);
   }
 
-  const { runs, footers, pageSize, headerText, codedSelection } = docContext;
+  const { runs, images, footers, pageSize, headerText, codedSelection, pdfMode } = docContext;
   const rulesConfig = await getRulesConfig();
 
   const footerCanonicalOverride = getCanonicalTextFromSheet(rulesConfig, moaType, "Footer");
@@ -39,8 +39,34 @@ export async function runAllChecks(fullText, moaType, docContext = {}) {
   const signatoryTiersOverride = getSignatoryTiersFromSheet(rulesConfig, moaType);
 
   const issues = [
-    ...runSharedChecks(fullText, { runs, footers, pageSize, moaType, footerCanonicalOverride }),
-    ...typeChecker(fullText, { gtcCanonicalOverride, signatoryTiersOverride, headerText, codedSelection }),
+    ...runSharedChecks(fullText, {
+      // In PDF mode, runs/images/footers/pageSize are all undefined —
+      // runSharedChecks' own checks already guard on these being present
+      // (see checkPayeeClause's `if (runs)`, checkFooter's
+      // `if (!footers || footers.length === 0)` special-case, etc.) —
+      // EXCEPT checkFooter and checkOnePageSignatoryBlock, which need an
+      // explicit pdfMode skip below since they otherwise treat "absent"
+      // as "definitely missing/unknown" and would always misfire in PDF
+      // mode. See Feature 3 in MO_NEXT_STEPS.md.
+      runs,
+      images,
+      footers,
+      pageSize,
+      moaType,
+      footerCanonicalOverride,
+      pdfMode,
+    }),
+    ...typeChecker(fullText, {
+      gtcCanonicalOverride,
+      signatoryTiersOverride,
+      // headerText is undefined in PDF mode -> checkTopRightCode already
+      // falls back to fullText when headerText is undefined, which would
+      // misfire in PDF mode since D-A-1a may appear ANYWHERE in flattened
+      // PDF text. Suppress it explicitly via pdfMode instead.
+      headerText: pdfMode ? undefined : headerText,
+      codedSelection,
+      pdfMode,
+    }),
     ...runAllSheetDrivenRules(fullText, moaType, rulesConfig),
   ];
   const leadTime = checkLeadTime(fullText, moaType);

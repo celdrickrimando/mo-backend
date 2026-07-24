@@ -1,6 +1,7 @@
 // Shared checks applied to every MOA type, per Mo_Rule_Checklist_Spec.md section 0.
 
 import { isTextBold } from "../googleDocs.js";
+import { checkNoSignaturesInDraft } from "./draftStage.js";
 
 const PLACEHOLDER_STRINGS = [
   "FULL COMPANY NAME",
@@ -290,9 +291,10 @@ function similarity(a, b) {
 
 const GTC_SIMILARITY_THRESHOLD = 0.95; // below this = "substantively edited"
 
-export function checkTopRightCode(fullText, moaType, canonicalOverride, headerText, codedSelection) {
+export function checkTopRightCode(fullText, moaType, canonicalOverride, headerText, codedSelection, pdfMode) {
   const issues = [];
   if (moaType !== "sponsorship" && moaType !== "internal") return issues; // Partnership handled separately (absence-only)
+  if (pdfMode) return issues; // no reliable header/body separation in flattened PDF text — skip rather than misfire
 
   // The top-right tracking code lives in the document HEADER, not the
   // body — check headerText if given, falling back to fullText only if
@@ -577,13 +579,14 @@ export function checkNameHonorifics(fullText, moaType) {
   return issues;
 }
 
-export function runSharedChecks(fullText, { runs, footers, pageSize, moaType, footerCanonicalOverride } = {}) {
+export function runSharedChecks(fullText, { runs, images, footers, pageSize, moaType, footerCanonicalOverride, pdfMode } = {}) {
   return [
     ...checkPlaceholders(fullText),
     ...checkRequiredSections(fullText),
-    ...checkPayeeClause(fullText, runs),
-    ...checkFooter(footers, moaType, footerCanonicalOverride),
-    ...checkOnePageSignatoryBlock(fullText, pageSize),
+    ...checkPayeeClause(fullText, runs), // bold check inside already no-ops without runs
+    ...(pdfMode ? [] : checkFooter(footers, moaType, footerCanonicalOverride)),
+    ...(pdfMode ? [] : checkOnePageSignatoryBlock(fullText, pageSize)),
     ...checkNameHonorifics(fullText, moaType),
+    ...(pdfMode ? [] : checkNoSignaturesInDraft(fullText, runs, images)),
   ];
 }

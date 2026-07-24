@@ -2,11 +2,11 @@
 
 import { checkTopRightCode } from "./shared.js";
 
-export function checkInternal(fullText, { gtcCanonicalOverride, headerText } = {}) {
+export function checkInternal(fullText, { gtcCanonicalOverride, headerText, pdfMode } = {}) {
   const issues = [];
 
   // Top-right tracking code (D-A-1a) correctness for Internal.
-  issues.push(...checkTopRightCode(fullText, "internal", gtcCanonicalOverride, headerText));
+  issues.push(...checkTopRightCode(fullText, "internal", gtcCanonicalOverride, headerText, undefined, pdfMode));
 
   // President representation check
   if (!/represented by its President/i.test(fullText)) {

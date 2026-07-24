@@ -10,6 +10,26 @@ function authorizedClient(accessToken) {
   return auth;
 }
 
+// Invisible marker prepended to every comment Mo creates. Google Docs'
+// comment sidebar doesn't render zero-width characters, so reviewers
+// never see this — but it lets a later /check run tell "a comment Mo
+// wrote" apart from "a comment a human reviewer wrote", since both are
+// created under the same signed-in user's identity (Mo has no bot
+// account of its own). Never change this string without also writing a
+// one-time migration to resolve comments tagged with the OLD marker,
+// or old comments will become permanently invisible to cleanup.
+const MO_COMMENT_MARKER = "\u200B\u2063\u200B";
+
+/**
+ * Prefixes a comment's message with Mo's invisible marker. Every call
+ * site that creates a comment (addComment, addGeneralComment) MUST wrap
+ * its message with this before sending it to the Drive API, or that
+ * comment becomes invisible to cleanupPreviousMoComments() forever.
+ */
+function tagMoComment(message) {
+  return `${MO_COMMENT_MARKER}${message}`;
+}
+
 /**
  * Walks a Docs API "content" array (from doc.body.content or a footer's
  * content array) and flattens it into a list of
@@ -19,6 +39,7 @@ function authorizedClient(accessToken) {
  */
 function extractRuns(content) {
   const runs = [];
+  const images = []; // NEW: [{startIndex, endIndex, objectId}]
   for (const el of content || []) {
     if (!el.paragraph) continue;
     for (const pe of el.paragraph.elements || []) {
@@ -43,10 +64,22 @@ function extractRuns(content) {
           bold: !!pe.autoText.textStyle?.bold,
           isPageNumber: pe.autoText.type === "PAGE_NUMBER",
         });
+      } else if (pe.inlineObjectElement) {
+        // An inserted image/drawing (e.g. a scanned/drawn signature).
+        // Docs represents these as a zero-width placeholder character in
+        // the text stream, referencing doc.inlineObjects[objectId] for
+        // the actual image data — we don't need the image bytes here,
+        // just its position, so checkNoSignaturesInDraft() can tell
+        // whether an image sits inside the signatory block.
+        images.push({
+          startIndex: pe.startIndex,
+          endIndex: pe.endIndex,
+          objectId: pe.inlineObjectElement.inlineObjectId,
+        });
       }
     }
   }
-  return runs;
+  return { runs, images };
 }
 
 /**
@@ -80,7 +113,7 @@ export async function fetchDocument(docId, accessToken) {
   }
   const doc = res.data;
 
-  const runs = extractRuns(doc.body?.content);
+  const { runs, images } = extractRuns(doc.body?.content);
   const fullText = runs.map((r) => r.text).join("");
 
   // Footers: doc.footers is a map of footerId -> Footer object. Collect
@@ -104,7 +137,7 @@ export async function fetchDocument(docId, accessToken) {
   const footers = [...footerIds]
     .filter((id) => doc.footers?.[id])
     .map((footerId) => {
-      const footerRuns = extractRuns(doc.footers[footerId].content);
+      const { runs: footerRuns } = extractRuns(doc.footers[footerId].content);
       return {
         footerId,
         runs: footerRuns,
@@ -133,7 +166,7 @@ export async function fetchDocument(docId, accessToken) {
   const headers = [...headerIds]
     .filter((id) => doc.headers?.[id])
     .map((headerId) => {
-      const headerRuns = extractRuns(doc.headers[headerId].content);
+      const { runs: headerRuns } = extractRuns(doc.headers[headerId].content);
       return {
         headerId,
         runs: headerRuns,
@@ -142,7 +175,7 @@ export async function fetchDocument(docId, accessToken) {
     });
   const headerText = headers.map((h) => h.fullText).join("\n");
 
-  return { doc, runs, fullText, footers, headers, headerText, pageSize };
+  return { doc, runs, images, fullText, footers, headers, headerText, pageSize };
 }
 
 /**
@@ -350,7 +383,7 @@ export async function addComment(docId, accessToken, range, message) {
     fileId: docId,
     fields: "id",
     requestBody: {
-      content: message,
+      content: tagMoComment(message),
       anchor,
     },
   });
@@ -381,7 +414,65 @@ export async function addGeneralComment(docId, accessToken, message) {
     fileId: docId,
     fields: "id",
     requestBody: {
-      content: message,
+      content: tagMoComment(message),
     },
   });
+}
+
+/**
+ * Finds every unresolved comment Mo previously wrote on this doc (marker-
+ * tagged, see tagMoComment) and resolves them via a "resolve" reply — the
+ * only way the Drive API supports resolving a comment (Comment.resolved
+ * is a read-only field; you can't just PATCH it to true). Comments the
+ * user wrote manually are left completely untouched, since they never
+ * carry the marker.
+ *
+ * Call this ONCE at the start of every /check run, before writing any of
+ * this run's highlights/comments, so stale anchors from a prior run never
+ * pile up alongside fresh ones.
+ *
+ * Returns {found, resolved} for observability in the /check response —
+ * "found" may be > "resolved" if some comments fail to resolve (e.g. a
+ * race with the user deleting the comment themselves mid-request); those
+ * failures are swallowed per-comment so one bad comment can't block
+ * cleanup of the rest or the rest of the /check run.
+ */
+export async function cleanupPreviousMoComments(docId, accessToken) {
+  const auth = authorizedClient(accessToken);
+  const drive = google.drive({ version: "v3", auth });
+
+  const staleIds = [];
+  let pageToken;
+  do {
+    const { data } = await drive.comments.list({
+      fileId: docId,
+      fields: "nextPageToken, comments(id, content, resolved)",
+      pageToken,
+      pageSize: 100,
+    });
+    for (const c of data.comments || []) {
+      if (!c.resolved && typeof c.content === "string" && c.content.startsWith(MO_COMMENT_MARKER)) {
+        staleIds.push(c.id);
+      }
+    }
+    pageToken = data.nextPageToken || undefined;
+  } while (pageToken);
+
+  let resolvedCount = 0;
+  for (const commentId of staleIds) {
+    try {
+      await drive.replies.create({
+        fileId: docId,
+        commentId,
+        fields: "id",
+        requestBody: { action: "resolve" },
+      });
+      resolvedCount++;
+    } catch (err) {
+      // Non-fatal: comment may already be gone/resolved by the user.
+      // Swallow and keep going so one failure doesn't block the rest.
+    }
+  }
+
+  return { found: staleIds.length, resolved: resolvedCount };
 }

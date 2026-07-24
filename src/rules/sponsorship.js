@@ -3,14 +3,14 @@
 import { checkSignatoryTier } from "./signatoryTiers.js";
 import { checkFonEitherOr, checkTopRightCode } from "./shared.js";
 
-export function checkSponsorship(fullText, { gtcCanonicalOverride, signatoryTiersOverride, headerText, codedSelection } = {}) {
+export function checkSponsorship(fullText, { gtcCanonicalOverride, signatoryTiersOverride, headerText, codedSelection, pdfMode } = {}) {
   const issues = [];
 
   // Top-right tracking code (D-A-1a) correctness for Sponsorship.
   // codedSelection ("coded" | "non_coded") is the user's pre-check
   // selection from the popup — used only as a precaution/fallback; see
   // checkTopRightCode for how it's cross-checked against the document.
-  issues.push(...checkTopRightCode(fullText, "sponsorship", gtcCanonicalOverride, headerText, codedSelection));
+  issues.push(...checkTopRightCode(fullText, "sponsorship", gtcCanonicalOverride, headerText, codedSelection, pdfMode));
 
   // Sponsorship tier / value must be present in the UNDERTAKING clause
   const undertakingIdx = fullText.indexOf("UNDERTAKING");

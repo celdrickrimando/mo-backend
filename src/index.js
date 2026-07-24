@@ -1,6 +1,14 @@
 import express from "express";
 import cors from "cors";
-import { fetchDocument, findRangeAnywhere, highlightRange, addComment, addGeneralComment } from "./googleDocs.js";
+import {
+  fetchDocument,
+  findRangeAnywhere,
+  highlightRange,
+  addComment,
+  addGeneralComment,
+  cleanupPreviousMoComments,
+} from "./googleDocs.js";
+import { fetchPdfDocument, getDriveFileMimeType } from "./pdf.js";
 import { runAllChecks } from "./rules/index.js";
 import { clearRulesCache } from "./rulesSheet.js";
 
@@ -26,10 +34,66 @@ app.post("/check", async (req, res) => {
   // moa.md. Ignore it for other MOA types rather than trusting the client.
   const effectiveCodedSelection = moaType === "sponsorship" ? codedSelection : undefined;
 
+  // Figure out whether this Drive file is a native Google Doc or a PDF
+  // before deciding which flow to run. Any other mimeType (e.g. an
+  // uploaded .docx that was never converted) still falls through to
+  // fetchDocument()'s existing "must not be an Office file" error.
+  let mimeType;
   try {
-    const { runs, fullText, footers, headers, pageSize, headerText } = await fetchDocument(docId, accessToken);
+    ({ mimeType } = await getDriveFileMimeType(docId, accessToken));
+  } catch (err) {
+    return res.status(500).json({ error: `Could not read this file from Drive: ${err.message}` });
+  }
+
+  if (mimeType === "application/pdf") {
+    try {
+      const { fullText, numPages } = await fetchPdfDocument(docId, accessToken);
+      const { issues, leadTime } = await runAllChecks(fullText, moaType, {
+        codedSelection: effectiveCodedSelection,
+        pdfMode: true,
+      });
+
+      // PDFs are read-only in Phase 1 — no highlight/comment writes.
+      // Every issue is just reported back to the popup, with a shared
+      // pdfMode flag so the popup can render an appropriate "read-only,
+      // review manually" framing instead of "marked/unmarked in doc".
+      return res.json({
+        pdfMode: true,
+        numPages,
+        issueCount: issues.length,
+        writeResults: issues.map((issue) => ({
+          issue: issue.type,
+          message: issue.message,
+          written: false,
+          reason: "PDF checks are read-only in this version — review and fix manually, then re-check.",
+        })),
+        afterword: issues.length === 0 ? AFTERWORD : null,
+        leadTimeOk: leadTime.leadTimeOk,
+        leadTimeDays: leadTime.leadTimeDays,
+        requiredLeadTimeDays: leadTime.requiredLeadTimeDays,
+        leadTimeNote: leadTime.note || null,
+      });
+    } catch (err) {
+      console.error(err);
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  try {
+    let cleanup = { found: 0, resolved: 0 };
+    try {
+      cleanup = await cleanupPreviousMoComments(docId, accessToken);
+    } catch (err) {
+      // Non-fatal — if cleanup fails (e.g. transient Drive API error), the
+      // check should still run; the user just may see one extra stale
+      // comment this round, not a broken check.
+      console.error("cleanupPreviousMoComments failed:", err.message);
+    }
+
+    const { runs, images, fullText, footers, headers, pageSize, headerText } = await fetchDocument(docId, accessToken);
     const { issues, leadTime } = await runAllChecks(fullText, moaType, {
       runs,
+      images,
       footers,
       pageSize,
       headerText,
@@ -136,6 +200,7 @@ app.post("/check", async (req, res) => {
       issueCount: issues.length,
       markedCount,
       unmarkedCount,
+      commentsCleanedUp: cleanup.resolved, // NEW
       afterword: issues.length === 0 ? AFTERWORD : null,
       leadTimeOk: leadTime.leadTimeOk,
       leadTimeDays: leadTime.leadTimeDays,
