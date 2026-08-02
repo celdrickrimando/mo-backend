@@ -47,17 +47,42 @@ function tagMoComment(message) {
  * or `table` set (or `tableOfContents`, ignored here — not used by these
  * templates), never both.
  */
-function walkContent(content, runs, images, pageBreaks, tableColumn) {
+// Resolves whether a run is EFFECTIVELY bold/italic, not just whether it
+// was explicitly toggled. The Docs API's per-run textStyle only contains
+// properties that were explicitly overridden on that exact run — if a key
+// like `bold` is simply absent, the run inherits it from the paragraph's
+// applied named style (namedStyles, keyed by namedStyleType, e.g.
+// "NORMAL_TEXT", "TITLE", "HEADING_1"). This is a common, easy-to-miss
+// case in real documents: someone bolds a line, then does Format >
+// Paragraph styles > "Update 'Normal text' to match selection" instead of
+// just pressing Ctrl+B on new text — every run typed afterward then
+// renders bold on screen (inherited from the updated style) while
+// carrying NO explicit textStyle.bold on the run itself. Reading only
+// `!!pe.textRun.textStyle?.bold` (treating "absent" the same as
+// "explicitly false") silently misses that and reports a visually-bold
+// name as not bold. Falls back to the named style's own value, and only
+// to `false` if neither the run nor the named style says otherwise.
+function resolveEffectiveStyle(runTextStyle, namedStyleTextStyle, prop) {
+  const runValue = runTextStyle?.[prop];
+  if (runValue !== undefined) return !!runValue;
+  const namedValue = namedStyleTextStyle?.[prop];
+  if (namedValue !== undefined) return !!namedValue;
+  return false;
+}
+
+function walkContent(content, runs, images, pageBreaks, tableColumn, namedStyles) {
   for (const el of content || []) {
     if (el.paragraph) {
+      const namedStyleType = el.paragraph.paragraphStyle?.namedStyleType || "NORMAL_TEXT";
+      const namedStyleTextStyle = namedStyles?.[namedStyleType];
       for (const pe of el.paragraph.elements || []) {
         if (pe.textRun?.content) {
           runs.push({
             text: pe.textRun.content,
             startIndex: pe.startIndex,
             endIndex: pe.endIndex,
-            bold: !!pe.textRun.textStyle?.bold,
-            italic: !!pe.textRun.textStyle?.italic,
+            bold: resolveEffectiveStyle(pe.textRun.textStyle, namedStyleTextStyle, "bold"),
+            italic: resolveEffectiveStyle(pe.textRun.textStyle, namedStyleTextStyle, "italic"),
             tableColumn, // undefined outside a table; 0-indexed cell position within its row otherwise
           });
         } else if (pe.autoText) {
@@ -71,8 +96,8 @@ function walkContent(content, runs, images, pageBreaks, tableColumn) {
             text: "",
             startIndex: pe.startIndex,
             endIndex: pe.endIndex,
-            bold: !!pe.autoText.textStyle?.bold,
-            italic: !!pe.autoText.textStyle?.italic,
+            bold: resolveEffectiveStyle(pe.autoText.textStyle, namedStyleTextStyle, "bold"),
+            italic: resolveEffectiveStyle(pe.autoText.textStyle, namedStyleTextStyle, "italic"),
             isPageNumber: pe.autoText.type === "PAGE_NUMBER",
             tableColumn,
           });
@@ -102,18 +127,30 @@ function walkContent(content, runs, images, pageBreaks, tableColumn) {
     } else if (el.table) {
       for (const row of el.table.tableRows || []) {
         (row.tableCells || []).forEach((cell, cellIndex) => {
-          walkContent(cell.content, runs, images, pageBreaks, cellIndex);
+          walkContent(cell.content, runs, images, pageBreaks, cellIndex, namedStyles);
         });
       }
     }
   }
 }
 
-function extractRuns(content) {
+// doc.namedStyles.styles is a flat list of { namedStyleType, textStyle, ... }
+// entries (one per style the document defines, e.g. NORMAL_TEXT, TITLE,
+// HEADING_1) — reshaped here into a lookup map keyed by namedStyleType so
+// walkContent() can resolve a paragraph's inherited bold/italic in O(1).
+function buildNamedStylesMap(doc) {
+  const map = {};
+  for (const style of doc.namedStyles?.styles || []) {
+    if (style.namedStyleType) map[style.namedStyleType] = style.textStyle || {};
+  }
+  return map;
+}
+
+function extractRuns(content, namedStyles) {
   const runs = [];
   const images = []; // [{startIndex, endIndex, objectId}]
   const pageBreaks = []; // [{startIndex, endIndex}] — explicit "Insert > Page break" markers
-  walkContent(content, runs, images, pageBreaks, undefined);
+  walkContent(content, runs, images, pageBreaks, undefined, namedStyles);
   return { runs, images, pageBreaks };
 }
 
@@ -162,8 +199,9 @@ export async function fetchDocument(docId, accessToken) {
     throw err;
   }
   const doc = res.data;
+  const namedStyles = buildNamedStylesMap(doc);
 
-  const { runs, images, pageBreaks } = extractRuns(doc.body?.content);
+  const { runs, images, pageBreaks } = extractRuns(doc.body?.content, namedStyles);
   const fullText = runs.map((r) => r.text).join("");
 
   // Footers: doc.footers is a map of footerId -> Footer object. Collect
@@ -187,7 +225,7 @@ export async function fetchDocument(docId, accessToken) {
   const footers = [...footerIds]
     .filter((id) => doc.footers?.[id])
     .map((footerId) => {
-      const { runs: footerRuns } = extractRuns(doc.footers[footerId].content);
+      const { runs: footerRuns } = extractRuns(doc.footers[footerId].content, namedStyles);
       return {
         footerId,
         runs: footerRuns,
@@ -216,7 +254,7 @@ export async function fetchDocument(docId, accessToken) {
   const headers = [...headerIds]
     .filter((id) => doc.headers?.[id])
     .map((headerId) => {
-      const { runs: headerRuns } = extractRuns(doc.headers[headerId].content);
+      const { runs: headerRuns } = extractRuns(doc.headers[headerId].content, namedStyles);
       return {
         headerId,
         runs: headerRuns,
@@ -313,16 +351,32 @@ function buildRunIndexMap(runs) {
  * should use these instead of isTextBold/isTextItalic — those two remain
  * for the few call sites that only have the text itself, not a position.
  */
+// TEMPORARY debug helper — set MO_DEBUG=1 in Render's env vars to print
+// exactly which run(s) isRangeBold/isRangeItalic looked at and what each
+// one's resolved bold/italic actually was, whenever the result is false.
+// Safe to leave in (near-zero cost when MO_DEBUG isn't set) but remove
+// once the representative-name bold issue is tracked down for good.
+function debugLogRange(label, runs, startIndex, endIndex, map, involvedRunIdxs) {
+  if (process.env.MO_DEBUG !== "1") return;
+  const text = involvedRunIdxs.size
+    ? Array.from(involvedRunIdxs).map((i) => JSON.stringify(runs[i].text)).join(" | ")
+    : "(no runs found in range)";
+  const flags = Array.from(involvedRunIdxs).map((i) => `run#${i} bold=${runs[i].bold} italic=${runs[i].italic}`).join(", ");
+  console.log(`[MO_DEBUG ${label}] range [${startIndex},${endIndex}) text=${text} -- ${flags}`);
+}
+
 export function isRangeBold(runs, startIndex, endIndex) {
   if (startIndex == null || endIndex == null || endIndex <= startIndex) return null;
   const map = buildRunIndexMap(runs);
   if (endIndex > map.length) return null;
   const involvedRunIdxs = new Set();
   for (let i = startIndex; i < endIndex; i++) involvedRunIdxs.add(map[i]);
+  let result = true;
   for (const runIdx of involvedRunIdxs) {
-    if (!runs[runIdx].bold) return false;
+    if (!runs[runIdx].bold) result = false;
   }
-  return true;
+  if (result === false) debugLogRange("isRangeBold", runs, startIndex, endIndex, map, involvedRunIdxs);
+  return result;
 }
 
 export function isRangeItalic(runs, startIndex, endIndex) {
@@ -944,4 +998,52 @@ export async function cleanupPreviousMoComments(docId, accessToken) {
   }
 
   return { found: staleIds.length, resolved: resolvedCount };
+}
+
+/**
+ * Permanently DELETES every comment on the document — Mo's own AND every
+ * comment a human reviewer left, resolved or not. This is deliberately a
+ * separate, much more destructive action from cleanupPreviousMoComments()
+ * above (which only ever resolves Mo's own marker-tagged comments as part
+ * of every normal /check run). Gated to admins ONLY at the route level in
+ * index.js via isAdminEmail() — this function itself does no permission
+ * checking, so it must never be called from anywhere that hasn't already
+ * verified the caller is an admin.
+ *
+ * Deletion (not resolution) is intentional: a "clear all previous
+ * comments" action is meant to give the document a clean slate before
+ * it moves to its next stage, not leave a pile of resolved-but-still-
+ * present comments behind.
+ */
+export async function clearAllComments(docId, accessToken) {
+  const auth = authorizedClient(accessToken);
+  const drive = google.drive({ version: "v3", auth });
+
+  const ids = [];
+  let pageToken;
+  do {
+    const { data } = await drive.comments.list({
+      fileId: docId,
+      fields: "nextPageToken, comments(id)",
+      pageToken,
+      pageSize: 100,
+      includeDeleted: false,
+    });
+    for (const c of data.comments || []) ids.push(c.id);
+    pageToken = data.nextPageToken || undefined;
+  } while (pageToken);
+
+  let deletedCount = 0;
+  for (const commentId of ids) {
+    try {
+      await drive.comments.delete({ fileId: docId, commentId });
+      deletedCount++;
+    } catch (err) {
+      // Non-fatal per-comment — e.g. a comment someone else deleted in
+      // the same instant this loop reached it. Keep going so one failure
+      // can't leave the rest of the document's comments un-cleared.
+    }
+  }
+
+  return { found: ids.length, deleted: deletedCount };
 }

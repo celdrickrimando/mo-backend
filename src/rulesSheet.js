@@ -97,21 +97,23 @@ export async function getRulesConfig({ forceRefresh = false } = {}) {
       canonicalText: [],
       signatoryTiers: [],
       constantSignatories: [],
+      admins: [],
     };
     cache = { data: empty, fetchedAt: now };
     return empty;
   }
 
-  const [requiredPhrases, forbiddenPhrases, eitherOrPhrases, canonicalText, signatoryTiers, constantSignatories] = await Promise.all([
+  const [requiredPhrases, forbiddenPhrases, eitherOrPhrases, canonicalText, signatoryTiers, constantSignatories, admins] = await Promise.all([
     readTab(sheets, spreadsheetId, "Required Phrases"),
     readTab(sheets, spreadsheetId, "Forbidden Phrases"),
     readTab(sheets, spreadsheetId, "Either-Or Phrases"),
     readTab(sheets, spreadsheetId, "Canonical Text"),
     readTab(sheets, spreadsheetId, "Signatory Tiers"),
     readTab(sheets, spreadsheetId, "Constant Signatories"),
+    readTab(sheets, spreadsheetId, "Admins"),
   ]);
 
-  const data = { requiredPhrases, forbiddenPhrases, eitherOrPhrases, canonicalText, signatoryTiers, constantSignatories };
+  const data = { requiredPhrases, forbiddenPhrases, eitherOrPhrases, canonicalText, signatoryTiers, constantSignatories, admins };
   cache = { data, fetchedAt: now };
   return data;
 }
@@ -119,4 +121,26 @@ export async function getRulesConfig({ forceRefresh = false } = {}) {
 /** Manually clear the cache (e.g. from a /refresh-rules admin endpoint). */
 export function clearRulesCache() {
   cache = { data: null, fetchedAt: 0 };
+}
+
+/**
+ * Checks whether `email` appears (case-insensitively) in the `Admins` tab
+ * of the same Mo Rules sheet, with Active not set to "N". This is the
+ * ONLY source of truth for who can clear all comments on a document —
+ * deliberately not a hardcoded list in code, so adding/removing an admin
+ * never needs a deploy: edit the sheet, done. Same 15s cache as every
+ * other sheet-driven rule above (or call /refresh-rules for an instant
+ * update). Returns false (not an error) if the sheet or tab isn't set up
+ * yet — an unconfigured admin list means "no one is an admin," not "let
+ * everyone in."
+ */
+export async function isAdminEmail(email) {
+  if (!email || typeof email !== "string") return false;
+  const { admins } = await getRulesConfig();
+  const target = email.trim().toLowerCase();
+  return admins.some((row) => {
+    const rowEmail = (row.email || "").toLowerCase();
+    const active = (row.active || "y").toLowerCase();
+    return rowEmail === target && active !== "n";
+  });
 }

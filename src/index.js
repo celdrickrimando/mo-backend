@@ -7,6 +7,7 @@ import {
   addComment,
   addGeneralComment,
   cleanupPreviousMoComments,
+  clearAllComments,
   clearAllMoHighlights,
   getDismissedIssueTypes,
   dismissIssueType,
@@ -20,7 +21,7 @@ import {
 } from "./googleDocs.js";
 import { fetchPdfDocument, getDriveFileMimeType } from "./pdf.js";
 import { runAllChecks } from "./rules/index.js";
-import { clearRulesCache } from "./rulesSheet.js";
+import { clearRulesCache, isAdminEmail } from "./rulesSheet.js";
 import { requireAllowedUser } from "./auth.js";
 import rateLimit from "express-rate-limit";
 
@@ -538,6 +539,50 @@ app.post("/reset-dismissed-issues", apiLimiter, requireAllowedUser(), async (req
       console.error("resetConfirmedCorrect failed:", err.message);
     }
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Tells the popup whether the signed-in user should see the "clear all
+// comments" admin button at all. The admin list itself lives in the
+// Admins tab of the Mo Rules sheet (see rulesSheet.js/isAdminEmail) — NOT
+// in this code — so adding/removing an admin never needs a deploy. This
+// route only ever reveals a true/false for the CALLER's own verified
+// email (req.userEmail, set by requireAllowedUser from their own access
+// token) — it can't be used to probe whether some other email is an
+// admin.
+app.post("/admin-status", apiLimiter, requireAllowedUser(), async (req, res) => {
+  try {
+    const admin = await isAdminEmail(req.userEmail);
+    res.json({ isAdmin: admin });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Permanently deletes EVERY comment on the document (Mo's own and every
+// human reviewer's, resolved or not) — the admin-only "clear all
+// comments" action. isAdminEmail() is checked here, server-side, against
+// req.userEmail from the verified token — never trust a client-supplied
+// "isAdmin" flag, since popup.js ships in the unpacked extension and
+// anyone can edit it locally.
+app.post("/clear-all-comments", apiLimiter, requireAllowedUser(), async (req, res) => {
+  const { docId, accessToken } = req.body;
+  if (!docId || !accessToken) {
+    return res.status(400).json({ error: "docId and accessToken are required." });
+  }
+  if (!DOC_ID_RE.test(docId)) {
+    return res.status(400).json({ error: "docId doesn't look like a valid Google Drive file ID." });
+  }
+
+  try {
+    const admin = await isAdminEmail(req.userEmail);
+    if (!admin) {
+      return res.status(403).json({ error: "Only Mo admins can clear all comments on a document." });
+    }
+    const result = await clearAllComments(docId, accessToken);
+    res.json({ ok: true, found: result.found, deleted: result.deleted });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
