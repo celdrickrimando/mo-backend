@@ -51,7 +51,16 @@ async function readTab(sheets, spreadsheetId, tabName) {
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId,
-      range: `${tabName}!A:Z`,
+      // Tab name MUST be single-quoted in A1 notation whenever it
+      // contains a space, hyphen, or other non-alphanumeric character —
+      // e.g. 'Either-Or Phrases'!A:Z. An unquoted multi-word range is
+      // invalid syntax and the Sheets API rejects it with "Unable to
+      // parse range," which readTab silently swallows into an empty []
+      // (by design, so a sheet problem never takes Mo's checks down) —
+      // but that meant this was failing silently for every tab with a
+      // space/hyphen in its name (all of them except "Admins"). Quoting
+      // is safe for single-word names too, so always do it.
+      range: `'${tabName}'!A:Z`,
     });
     const rows = res.data.values || [];
     if (rows.length < 2) return [];
